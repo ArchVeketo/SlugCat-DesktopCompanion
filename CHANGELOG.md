@@ -1,5 +1,22 @@
 # Changelog - Slugcat Desktop Companion
 
+## [v16.2] - 2026-10-15
+
+### 🐛 Correções de Bugs (Bugfix Patch)
+- **Largura real de movimentação (Monitor Bound)**:
+  - O Slugcat estava preso em um raio central de 360px (`screenSimWidth = 60f`). Agora `ScreenSimHalfWidth` é calculado com base na largura real do monitor primário menos margem segura, permitindo que ele caminhe pela tela inteira.
+- **Inversão da ordem e posição dos braços (Arm Inversion & Facing)**:
+  - O braço de trás e da frente estavam invertidos em relação ao observador quando virado para a direita.
+  - Posições dos ombros agora consideram `Facing`, garantindo que troquem de lado ao mudar de direção sem descolar do corpo.
+- **Rotação facial síncrona com a cabeça**:
+  - A rotação do rosto (`FaceA`) estava fixada em `0f`, fazendo os olhos ficarem horizontais mesmo com o corpo ou a cabeça inclinados. Agora herda a rotação angular do segmento superior.
+- **Pivô de flip horizontal de sprites assimétricos**:
+  - `DrawSprite` ajustado para espelhar o `anchorX` quando `flipX = true`, evitando que peças assimétricas como ombros/braços sofram deslocamento lateral involuntário no giro.
+- **Proteção contra float overflow em sessões longas**:
+  - `WalkPhase` agora faz wrap preventivo para preservar a precisão decimal de ponto flutuante em execuções prolongadas sem alterar o ciclo de passos.
+
+---
+
 ## [v16.1] - 2026-10-15
 
 ### 🐛 Correções de Bugs
