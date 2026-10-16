@@ -304,6 +304,13 @@ namespace SlugcatDesktop
         private const float HEAD_ADAPT_RETAIN = 0.3f;
         private const float HEAD_EXAGGERATE = 0.1f;
 
+        // Constantes para fisica das pernas (baseado no slugcatpet)
+        private const float LEGS_CONNECT_RAD = 5f;
+        private const float LEGS_HOST_VY = -10f;
+        private const float LEGS_ELASTIC = 0.25f;
+        private const float LEGS_ADAPT_RETAIN = 0.5f;
+        private const float LEGS_EXAGGERATE = 0.1f;
+
         public readonly BodyChunk[] Chunks;
         public readonly TailSegment[] Tail;
         private Vec2 _bellyPos;
@@ -496,7 +503,8 @@ namespace SlugcatDesktop
         }
 
         /// <summary>
-        /// Atualiza fisica das pernas com posicionamento relativo ao quadril.
+        /// Atualiza fisica das pernas com fisica elastica completa (baseado no slugcatpet).
+        /// Usa ConnectToPoint para inercia real.
         /// </summary>
         private void UpdateLegs()
         {
@@ -515,15 +523,19 @@ namespace SlugcatDesktop
             
             Vec2 target = hipPos + new Vec2(legOffsetX, legOffsetY);
             
-            // Suaviza movimento das pernas em direcao ao target
-            Vec2 diff = target - Legs.Pos;
-            float followSpeed = IsOnGround() ? 0.4f : 0.25f;
+            // Velocidades do corpo (host) para exagerar movimento
+            float hostVx = Chunks[1].Vel.X;
+            float hostVy = Chunks[1].Vel.Y + LEGS_HOST_VY;  // Bias para baixo
             
-            Legs.Pos = Legs.Pos + diff * followSpeed;
+            // Atualiza fisica: inercia + atrito do ar
+            Legs.Update(0.95f);
             
-            // Garante que pernas nao afundem no chao
-            if (Legs.Pos.Y < 1f)
-                Legs.Pos.Y = 1f;
+            // Conecta ao target com fisica elastica completa (como slugcatpet)
+            Legs.ConnectToPoint(target, hostVx, hostVy, 
+                LEGS_CONNECT_RAD, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
+            
+            // Colisao com chao
+            Legs.PushOutOfFloor(0f, 1f);
             
             // Sincroniza LegsPos para compatibilidade com renderizacao
             LegsPos = Legs.Pos;
