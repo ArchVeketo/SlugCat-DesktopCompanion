@@ -171,6 +171,8 @@ namespace SlugcatDesktop
         // Expressões faciais e animações
         private int _blinkCounter;
         private int _faceFrame;
+        private int _expressionTimer = 300;
+        private int _expressionHoldTimer = 0;
         private bool _blinking;
 
         // Braços
@@ -195,7 +197,7 @@ namespace SlugcatDesktop
             // Vanilla adult Survivor tail radii and connection radii.
             float[] radii = new float[] { 6f, 4f, 2.5f, 1f };
             float[] connections = new float[] { 4f, 7f, 7f, 7f };
-            const float tailLengthScale = 1.3f;
+            const float tailLengthScale = 1.0f;
             Tail = new TailSegment[4];
             Vec2 anchor = TailAnchor;
             Vec2 back = new Vec2(-Facing, 0f);
@@ -266,10 +268,10 @@ namespace SlugcatDesktop
                 // Só pula com os pés no chão (sem pulo duplo no ar).
                 if (IsOnGround())
                 {
-                    Chunks[0].Vel.Y += 7.5f;
-                    Chunks[1].Vel.Y += 7.5f;
-                    Chunks[0].Vel.X += Facing * 1.25f;
-                    Chunks[1].Vel.X += Facing * 1.25f;
+                    Chunks[0].Vel.Y += 8.0f;
+                    Chunks[1].Vel.Y += 5.5f;
+                    Chunks[0].Vel.X += Facing * 1.5f;
+                    Chunks[1].Vel.X += Facing * 0.8f;
                     Walking = false;
                     _stateTicks = 0;
                     _stateLength = 100;
@@ -284,6 +286,7 @@ namespace SlugcatDesktop
                 Chunks[0].Vel.X += force;
                 Chunks[1].Vel.X += force;
                 WalkPhase += 1f;
+                if (WalkPhase > 35000f) WalkPhase -= 35000f;
                 WalkSpeed = Math.Abs((Chunks[0].Vel.X + Chunks[1].Vel.X) * 0.5f);
                 Facing = _direction;
             }
@@ -352,13 +355,8 @@ namespace SlugcatDesktop
 
         private bool IsOnGround()
         {
-            for (int i = 0; i < Chunks.Length; i++)
-            {
-                BodyChunk chunk = Chunks[i];
-                if (chunk.Pos.Y <= chunk.Radius + 0.35f && Math.Abs(chunk.Vel.Y) < 2f)
-                    return true;
-            }
-            return false;
+            BodyChunk lower = Chunks[1];
+            return lower.Pos.Y <= lower.Radius + 0.35f && Math.Abs(lower.Vel.Y) < 2f;
         }
 
         private static void UpdateChunk(BodyChunk chunk)
@@ -418,7 +416,7 @@ namespace SlugcatDesktop
             upper.Pos = lower.Pos + new Vec2(horizontal, vertical) * BodyConnectionDistance;
 
             float relativeHorizontalSpeed = upper.Vel.X - lower.Vel.X;
-            float damping = grounded ? 0.9f : 0.25f;
+            float damping = grounded ? 0.3f : 0.2f;
             upper.Vel.X -= relativeHorizontalSpeed * damping;
         }
 
@@ -457,6 +455,7 @@ namespace SlugcatDesktop
             if (Walking && WalkSpeed > 0.1f)
             {
                 _armSwing += WalkSpeed * 0.15f;
+                if (_armSwing > 628.318f) _armSwing -= 628.318f;
                 float swing = (float)Math.Sin(_armSwing) * 0.3f;
                 _armAngles[0] = Clamp(swing * Facing, -0.5f, 0.5f);
                 _armAngles[1] = Clamp(-swing * Facing, -0.5f, 0.5f);
@@ -478,8 +477,18 @@ namespace SlugcatDesktop
             if (up.Length < 0.001f)
                 up = new Vec2(0f, 1f);
 
-            shoulder = Vec2.Lerp(rig.Belly, rig.Neck, 0.8f)
-                + new Vec2(Facing * (front ? 1.5f : -0.5f), 0f);
+            // draw0 = Neck (chunk0), draw1 = Belly interpolado para ombro
+            Vec2 draw0 = rig.Neck;
+            Vec2 draw1 = rig.Belly;
+
+            // Get spine angle from draw0 to draw1
+            float spineAng = (float)Math.Atan2(draw1.Y - draw0.Y, draw1.X - draw0.X);
+            // Rotate shoulder offset by spine angle (Y offset is 3.5 in Y-down, so -3.5 in our Y-up)
+            float ox = Facing * 4.5f;
+            float oy = -3.5f;
+            float rotatedOx = ox * (float)Math.Cos(spineAng) - oy * (float)Math.Sin(spineAng);
+            float rotatedOy = ox * (float)Math.Sin(spineAng) + oy * (float)Math.Cos(spineAng);
+            shoulder = Vec2.Lerp(draw0, draw1, 0.35f) + new Vec2(rotatedOx, rotatedOy);
 
             float a = Clamp(_armAngles[index], -0.5f, 0.5f);
             float cos = (float)Math.Cos(a);
@@ -509,6 +518,14 @@ namespace SlugcatDesktop
 
         private void UpdateFacialExpression()
         {
+            if (_expressionHoldTimer > 0)
+            {
+                _expressionHoldTimer--;
+                if (_expressionHoldTimer <= 0)
+                    _faceFrame = 0;
+                return;
+            }
+
             // Sistema de piscar
             _blinkCounter--;
             if (_blinkCounter <= 0)
@@ -525,6 +542,12 @@ namespace SlugcatDesktop
                     _faceFrame = 0;
                     _blinkCounter = _random.Next(80, 220);
                 }
+            }
+            else if (!_blinking && --_expressionTimer <= 0)
+            {
+                _faceFrame = _random.Next(4, 9);
+                _expressionHoldTimer = _random.Next(15, 45);
+                _expressionTimer = _random.Next(200, 500);
             }
         }
 
@@ -625,9 +648,12 @@ namespace SlugcatDesktop
         {
             get
             {
-                float lookAngle = Clamp(LookX * Facing, -1f, 1f);
-                int frame = (int)((lookAngle + 1f) / 2f * 8f);
-                return Clamp(frame, 0, 8);
+                // FIX 4: use physical angle, not LookX
+                Vec2 headDir = Chunks[0].Pos - Chunks[1].Pos; // head chunk - body chunk
+                float headAng = (float)(Math.Atan2(headDir.X, headDir.Y) * 180.0 / Math.PI); // degrees
+                int frame = (int)Math.Round(Math.Abs(headAng / 360.0 * 34.0));
+                frame = Math.Min(frame, 17); // clamp to valid range
+                return frame;
             }
         }
 
@@ -678,6 +704,14 @@ namespace SlugcatDesktop
         private bool _dragging;
         private Point _dragStart;
 
+        // Buffers pre-alocados para DrawTail (sem GC a 60 FPS)
+        private readonly Vec2[] _tailCL = new Vec2[5];
+        private readonly float[] _tailR  = new float[5];
+        private readonly Vec2[] _tailSmooth  = new Vec2[21];
+        private readonly float[] _tailSmoothR = new float[21];
+        private readonly Point[] _tailOutline  = new Point[42];
+        private static readonly SolidBrush _whiteBrush = new SolidBrush(Color.White);
+
         public CompanionWindow()
         {
             string assetDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets\\player");
@@ -702,8 +736,6 @@ namespace SlugcatDesktop
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
 
-            // Janela arrastável de 450x214px
-            ClientSize = new Size(WindowWidth, WindowHeight);
             BackColor = KeyColor;
             TransparencyKey = KeyColor;
             DoubleBuffered = true;
@@ -712,10 +744,8 @@ namespace SlugcatDesktop
             
             // Inicia centralizado na parte de baixo da tela
             Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(
-                workArea.Left + (workArea.Width - WindowWidth) / 2,
-                workArea.Bottom - WindowHeight
-            );
+            ClientSize = new Size(workArea.Width, WindowHeight);
+            Location = new Point(workArea.Left, workArea.Bottom - WindowHeight);
 
             // As bordas do mundo seguem a largura real da janela
             _worldHalfWidth = Math.Max(30f, ClientSize.Width * 0.5f / PixelScale - EdgeMargin);
@@ -829,14 +859,12 @@ namespace SlugcatDesktop
             float centerX = ClientSize.Width * 0.5f;
             float floorY = ClientSize.Height - 19f;
 
-            DrawTail(g, anchor, centerX, floorY);
-
             Vec2 upperAxis = (rig.Neck - rig.Belly).Normalized;
             Vec2 lowerAxis = (rig.Belly - rig.Waist).Normalized;
             float upperAngle = (float)(Math.Atan2(upperAxis.X, upperAxis.Y) * 180.0 / Math.PI);
             float lowerAngle = (float)(Math.Atan2(lowerAxis.X, lowerAxis.Y) * 180.0 / Math.PI);
 
-            // Ordem: rabo -> braço de trás -> BodyA -> HipsA -> pernas -> braço da frente -> cabeça -> rosto
+            // Ordem (Rain World original): braco traseiro -> corpo -> rabo -> pernas -> quadril -> braco frontal -> cabeca -> rosto
             int backArmIndex = _simulation.Facing > 0 ? 1 : 0;
             int frontArmIndex = _simulation.Facing > 0 ? 0 : 1;
 
@@ -844,11 +872,14 @@ namespace SlugcatDesktop
 
             DrawSprite(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
                 false, 0.5f, 0.7894737f);
-            DrawSprite(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
-                false, 0.5f, 0.7894737f);
+
+            DrawTail(g, anchor, centerX, floorY);
 
             DrawSprite(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
                 0f, false, 0.5f, 0.25f);
+
+            DrawSprite(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
+                false, 0.5f, 0.7894737f);
 
             DrawArm(g, frontArmIndex, true, centerX, floorY);
 
@@ -858,7 +889,7 @@ namespace SlugcatDesktop
 
             Vec2 facePos = headPos + new Vec2(_simulation.LookX * 2.2f, -2f + _simulation.LookY * 1.5f);
             DrawSprite(g, _faces[_simulation.FaceFrame], ToScreen(facePos, centerX, floorY),
-                0f, _simulation.Facing < 0f);
+                upperAngle * 0.35f, _simulation.Facing < 0f);
         }
 
         private void DrawArm(Graphics g, int index, bool front, float centerX, float floorY)
@@ -872,17 +903,21 @@ namespace SlugcatDesktop
 
             // O sprite aponta do ombro (direita) para a mão (esquerda): o eixo -X do sprite
             // deve coincidir com o vetor ombro->mão na tela.
-            float angle = (float)(Math.Atan2(-(ph.Y - ps.Y), -(ph.X - ps.X)) * 180.0 / Math.PI);
+            // FIX 3: rotation formula needs +90 degrees (atan2(dx, dy) + PI/2)
+            float dx = hand.X - shoulder.X;
+            float dy = hand.Y - shoulder.Y;
+            float angle = (float)(Math.Atan2(dx, dy) * 180.0 / Math.PI) + 90f;
 
             // Âncora = ombro (borda direita, meio da altura). Sem flip: a direção já espelha.
-            DrawSprite(g, _arms[frame], ps, angle, false, 1f, 0.5f);
+            // FIX 2: draw at HAND position (ph), not shoulder, with anchor (0.9, 0.5)
+            DrawSprite(g, _arms[frame], ph, angle, false, 0.9f, 0.5f);
         }
 
         private void DrawTail(Graphics g, Vec2 anchor, float centerX, float floorY)
         {
             int count = _simulation.Tail.Length + 1;
-            Vec2[] centerline = new Vec2[count];
-            float[] radii = new float[count];
+            Vec2[] centerline = _tailCL;
+            float[] radii = _tailR;
             centerline[0] = anchor;
             const float renderWidthScale = 0.72f;
             radii[0] = _simulation.Tail[0].StretchedRadius * renderWidthScale;
@@ -897,8 +932,8 @@ namespace SlugcatDesktop
             // Interpolate between the four simulated tail segments before outlining them.
             const int curveSteps = 5;
             int smoothCount = (count - 1) * curveSteps + 1;
-            Vec2[] smoothLine = new Vec2[smoothCount];
-            float[] smoothRadii = new float[smoothCount];
+            Vec2[] smoothLine = _tailSmooth;
+            float[] smoothRadii = _tailSmoothR;
             int sample = 0;
             for (int i = 0; i < count - 1; i++)
             {
@@ -917,7 +952,7 @@ namespace SlugcatDesktop
             smoothLine[sample] = centerline[count - 1];
             smoothRadii[sample] = radii[count - 1];
 
-            Point[] outline = new Point[smoothCount * 2];
+            Point[] outline = _tailOutline;
             for (int i = 0; i < smoothCount; i++)
             {
                 Vec2 tangent = i == 0
@@ -934,10 +969,7 @@ namespace SlugcatDesktop
                     ToScreen(smoothLine[i] - normal * smoothRadii[i], centerX, floorY));
             }
 
-            using (SolidBrush brush = new SolidBrush(Color.White))
-            {
-                g.FillPolygon(brush, outline);
-            }
+            g.FillPolygon(_whiteBrush, outline);
         }
 
         private static Vec2 CatmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t)
