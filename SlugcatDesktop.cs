@@ -503,77 +503,62 @@ namespace SlugcatDesktop
         }
 
         /// <summary>
-        /// Atualiza fisica das pernas com inercia real (igual ao GenericBodyPart do jogo).
+        /// Atualiza fisica das pernas usando GenericBone.ConnectToPoint com gravidade visual constante.
         /// </summary>
         private void UpdateLegs()
         {
             // 1. Atualiza fisica (inercia + atrito)
             Legs.Update(LEGS_AIR);
             
-            // 2. Conecta ao quadril com fisica elastica completa
+            // 2. Calcula posicao do quadril e target
             Vec2 hipPos = Chunks[1].Pos;
-            float hostVx = Chunks[1].Vel.X;
-            float hostVy = LEGS_HOST_VY;  // Constante para baixo (gravidade visual)
-            Legs.ConnectToPoint(hipPos, hostVx, hostVy, LEGS_CONNECT_RAD, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
+            Vec2 target;
+            
+            // 3. Conecta com parametros diferentes para chao vs ar
+            if (IsOnGround())
+            {
+                target = hipPos + new Vec2(LegsDirection.X * 8f, -1f);
+                Legs.ConnectToPoint(target, Chunks[1].Vel.X, LEGS_HOST_VY, 5f, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
+            }
+            else
+            {
+                target = hipPos + new Vec2(LegsDirection.X * 8f, -2f);
+                Legs.ConnectToPoint(target, Chunks[1].Vel.X, LEGS_HOST_VY, LEGS_CONNECT_RAD, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
+            }
             
             // 4. Colisao com chao
             Legs.PushOutOfFloor();
             
-            // 5. Atualiza legsDirection baseado no bodyMode/movimento
+            // 5. Atualiza direcao das pernas
             UpdateLegsDirection();
             
-            // 6. Forca as pernas a seguirem a direcao desejada (suavemente)
-            Vec2 targetPos = hipPos + LegsDirection * 5f;
-            Legs.Vel = Legs.Vel + (targetPos - Legs.Pos) * 0.08f;
-            
-            // 7. Sincroniza LegsPos para compatibilidade com codigo existente
+            // 6. Sincroniza LegsPos para compatibilidade
             LegsPos = Legs.Pos;
         }
 
         /// <summary>
         /// Atualiza a direcao das pernas conforme o movimento e estado.
+        /// Simplificado: no chao andando (-Facing*0.3, -0.9), senao (decai, -1).
         /// </summary>
         private void UpdateLegsDirection()
         {
-            // No chao andando: pernas apontam ligeiramente para tras (oposto a direcao)
-            if (Walking && IsOnGround())
+            if (IsOnGround() && Walking)
             {
-                float targetX = -Facing * 0.3f;
-                LegsDirection.X = LegsDirection.X + (targetX - LegsDirection.X) * 0.1f;
+                LegsDirection.X = -Facing * 0.3f;
                 LegsDirection.Y = -0.9f;
             }
-            // No ar (pulando/caindo): pernas apontam para baixo e ligeiramente para tras
-            else if (!IsOnGround())
-            {
-                float fallSpeed = -Chunks[1].Vel.Y;
-                if (fallSpeed > 2f)
-                {
-                    LegsDirection.X = LegsDirection.X * 0.95f;
-                    LegsDirection.Y = -1f;
-                }
-                else if (Chunks[1].Vel.Y > 2f)
-                {
-                    LegsDirection.X = Facing * 0.2f;
-                    LegsDirection.Y = -0.8f;
-                }
-                else
-                {
-                    // Velocidade baixa no ar (flutuando): pernas retas para baixo
-                    LegsDirection.X = LegsDirection.X * 0.95f;
-                    LegsDirection.Y = -1f;
-                }
-            }
-            // Parado: pernas retas para baixo
             else
             {
-                LegsDirection.X = LegsDirection.X * 0.92f;
+                LegsDirection.X *= 0.95f;
                 LegsDirection.Y = -1f;
             }
             
             // Normaliza
-            LegsDirection = LegsDirection.Normalized;
-            if (LegsDirection.Length < 0.001f)
-                LegsDirection = new Vec2(0f, -1f);
+            float len = LegsDirection.Length;
+            if (len > 0.0001f)
+            {
+                LegsDirection = LegsDirection / len;
+            }
         }
 
         private void UpdateBehavior()
