@@ -133,6 +133,91 @@ namespace SlugcatDesktop
     }
 
     /// <summary>
+    /// Osso generico com fisica de conexao elastica completa (baseado no slugcatpet).
+    /// Usado para pernas e cabeca - partes que seguem o corpo com inercia real.
+    /// </summary>
+    internal sealed class GenericBone
+    {
+        public Vec2 Pos;
+        public Vec2 LastPos;
+        public Vec2 Vel;
+
+        public GenericBone()
+        {
+            Pos = new Vec2(0f, 0f);
+            LastPos = Pos;
+            Vel = new Vec2(0f, 0f);
+        }
+
+        /// <summary>
+        /// Atualiza fisica: inercia + atrito do ar.
+        /// </summary>
+        public void Update(float airFriction = 0.99f)
+        {
+            LastPos = Pos;
+            Pos = Pos + Vel;
+            Vel = Vel * airFriction;
+        }
+
+        /// <summary>
+        /// Conecta este osso a um ponto-alvo com fisica elastica completa.
+        /// Baseado no ConnectToPoint do slugcatpet com todos os parametros.
+        /// </summary>
+        /// <param name="target">Ponto alvo (ex: quadril)</param>
+        /// <param name="hostVx">Velocidade X do host (para exagerar movimento)</param>
+        /// <param name="hostVy">Velocidade Y do host (para exagerar movimento)</param>
+        /// <param name="connectRad">Raio maximo de conexao</param>
+        /// <param name="elastic">Forca elastica (quanto puxa de volta)</param>
+        /// <param name="adaptRetain">Retencao da velocidade propria vs host</param>
+        /// <param name="exaggerate">Quanto exagera o movimento do host</param>
+        public void ConnectToPoint(Vec2 target, float hostVx, float hostVy, 
+            float connectRad = 5f, float elastic = 0.25f, float adaptRetain = 0.5f, float exaggerate = 0.1f)
+        {
+            Vec2 diff = target - Pos;
+            float dist = diff.Length;
+            
+            // 1. Forca elastica: puxa na direcao do alvo
+            if (dist > 0.0001f)
+            {
+                Vel.X += diff.X * elastic;
+                Vel.Y += diff.Y * elastic;
+            }
+            
+            // 2. Exagera movimento do host (da inercia visual)
+            Vel.X += hostVx * exaggerate;
+            Vel.Y += hostVy * exaggerate;
+            
+            // 3. Limita distancia: se muito longe, reposiciona
+            if (dist > connectRad && dist > 0.0001f)
+            {
+                Vec2 dir = diff / dist;
+                float corr = dist - connectRad;
+                Pos.X += dir.X * corr;
+                Pos.Y += dir.Y * corr;
+                Vel.X += dir.X * corr;
+                Vel.Y += dir.Y * corr;
+            }
+            
+            // 4. Adapta velocidade: mistura velocidade propria com a do host
+            Vel.X = hostVx + (Vel.X - hostVx) * adaptRetain;
+            Vel.Y = hostVy + (Vel.Y - hostVy) * adaptRetain;
+        }
+
+        /// <summary>
+        /// Colisao com chao.
+        /// </summary>
+        public void PushOutOfFloor(float floorY = 0f, float margin = 1f)
+        {
+            if (Pos.Y < floorY + margin)
+            {
+                Pos.Y = floorY + margin;
+                if (Vel.Y < 0f)
+                    Vel.Y = -Vel.Y * 0.1f;
+                Vel.X *= 0.9f;
+            }
+        }
+    }
+    /// <summary>
     /// Parte generica do corpo com fisica propria (inercia, velocidade, conexao elastica).
     /// Baseado no GenericBodyPart do Rain World original.
     /// </summary>
@@ -211,9 +296,20 @@ namespace SlugcatDesktop
         // Metade da largura do mundo em unidades de simulação (definida pela janela a partir do monitor).
         public float WorldHalfWidth = 60f;
 
-        // Constantes para fisica das pernas (escaladas para sprite maior)
-        private const float LegsAirFriction = 0.99f;
-        private const float LegsConnectRad = 7f;
+        // Constantes para fisica das pernas (baseado no slugcatpet, Y positivo para cima)
+        private const float LEGS_AIR = 0.99f;
+        private const float LEGS_CONNECT_RAD = 5f;
+        private const float LEGS_ELASTIC = 0.25f;
+        private const float LEGS_ADAPT_RETAIN = 0.5f;
+        private const float LEGS_EXAGGERATE = 0.1f;
+        private const float LEGS_HOST_VY = -10f;  // Negativo porque Y sobe
+
+        // Constantes para fisica da cabeca
+        private const float HEAD_AIR = 0.99f;
+        private const float HEAD_CONNECT_RAD = 3f;
+        private const float HEAD_ELASTIC = 0.2f;
+        private const float HEAD_ADAPT_RETAIN = 0.3f;
+        private const float HEAD_EXAGGERATE = 0.1f;
 
         public readonly BodyChunk[] Chunks;
         public readonly TailSegment[] Tail;
@@ -223,7 +319,7 @@ namespace SlugcatDesktop
         public Vec2 HeadLastPos;
         public Vec2 HeadVel;
         public Vec2 LegsPos;
-        public GenericBodyPart Legs;
+        public GenericBone Legs;
         public Vec2 LegsDirection;
         public float Facing = 1f;
         public float LookX = 1f;
@@ -282,9 +378,10 @@ namespace SlugcatDesktop
             HeadPos = Chunks[0].Pos + new Vec2(0f, 5f);
             HeadLastPos = HeadPos;
             
-            // Pernas como GenericBodyPart real (fisica igual ao jogo)
+            // Pernas como GenericBone (fisica elastica completa do slugcatpet)
             Vec2 hipPos = Chunks[1].Pos;
-            Legs = new GenericBodyPart(2f, hipPos + new Vec2(0f, -2f));
+            Legs = new GenericBone();
+            Legs.Pos = hipPos + new Vec2(0f, -8f);
             LegsDirection = new Vec2(0f, -1f);
             LegsPos = Legs.Pos;
             
@@ -411,14 +508,13 @@ namespace SlugcatDesktop
         private void UpdateLegs()
         {
             // 1. Atualiza fisica (inercia + atrito)
-            Legs.Update(LegsAirFriction);
+            Legs.Update(LEGS_AIR);
             
-            // 2. Gravidade leve nas pernas
-            Legs.Vel.Y -= Gravity * 0.3f;
-            
-            // 3. Conecta ao quadril (Chunk[1])
+            // 2. Conecta ao quadril com fisica elastica completa
             Vec2 hipPos = Chunks[1].Pos;
-            Legs.ConnectToPoint(hipPos, LegsConnectRad, 0.5f);
+            float hostVx = Chunks[1].Vel.X;
+            float hostVy = LEGS_HOST_VY;  // Constante para baixo (gravidade visual)
+            Legs.ConnectToPoint(hipPos, hostVx, hostVy, LEGS_CONNECT_RAD, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
             
             // 4. Colisao com chao
             Legs.PushOutOfFloor();
