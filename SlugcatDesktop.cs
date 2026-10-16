@@ -870,7 +870,7 @@ namespace SlugcatDesktop
         private static readonly SolidBrush _whiteBrush = new SolidBrush(Color.White);
 
         // === DEBUG MODE ===
-        private const bool DebugMode = true; // Debug mode
+        private const bool DebugMode = false; // Debug mode desativado para release
         private int _debugFrameCounter;
         private const int DebugCaptureInterval = 10; // Captura mais frequente no benchmark
         private string _debugFolder;
