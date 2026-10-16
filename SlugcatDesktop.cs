@@ -33,8 +33,11 @@ namespace SlugcatDesktop
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
+            // Modo benchmark: roda automaticamente e fecha
+            bool benchmarkMode = args.Length > 0 && args[0] == "--benchmark";
+            
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
@@ -44,13 +47,14 @@ namespace SlugcatDesktop
             };
             try
             {
-                Application.Run(new CompanionWindow());
+                Application.Run(new CompanionWindow(benchmarkMode));
             }
             catch (Exception ex)
             {
                 Log.Error("Main", ex);
-                MessageBox.Show("O Slugcat Companion não conseguiu iniciar.\r\n\r\n" + ex.Message,
-                    "Slugcat Companion", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (!benchmarkMode)
+                    MessageBox.Show("O Slugcat Companion não conseguiu iniciar.\r\n\r\n" + ex.Message,
+                        "Slugcat Companion", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }
@@ -456,7 +460,7 @@ namespace SlugcatDesktop
             {
                 _armSwing += WalkSpeed * 0.15f;
                 if (_armSwing > 628.318f) _armSwing -= 628.318f;
-                float swing = (float)Math.Sin(_armSwing) * 0.6f;
+                float swing = (float)Math.Sin(_armSwing) * 0.3f;
                 _armAngles[0] = Clamp(swing * Facing, -0.5f, 0.5f);
                 _armAngles[1] = Clamp(-swing * Facing, -0.5f, 0.5f);
             }
@@ -496,7 +500,7 @@ namespace SlugcatDesktop
             Vec2 down = up * -1f;
             Vec2 swung = new Vec2(down.X * cos - down.Y * sin, down.X * sin + down.Y * cos);
 
-            hand = shoulder + swung * 12f;
+            hand = shoulder + swung * 10f;
         }
 
         // Escolhe o frame cujo comprimento é o mais próximo da distância ombro->mão
@@ -711,19 +715,30 @@ namespace SlugcatDesktop
         private readonly float[] _tailSmoothR = new float[21];
         private readonly Point[] _tailOutline  = new Point[42];
         private static readonly SolidBrush _whiteBrush = new SolidBrush(Color.White);
-        
+
         // === DEBUG MODE ===
-        private static readonly bool DebugMode = true; // Debug ativo
+        private const bool DebugMode = false; // Debug mode
         private int _debugFrameCounter;
-        private int _debugCaptureInterval = 30; // Captura a cada N frames (~2 por segundo)
+        private const int DebugCaptureInterval = 10; // Captura mais frequente no benchmark
         private string _debugFolder;
         private Font _debugFont;
-        private SolidBrush _debugBrush;
-        private SolidBrush _debugBgBrush;
+        private Font _debugFontSmall;
         private bool _debugCapturePaused;
+        private bool _debugShowBounds = true;
+        private bool _debugShowOrder = true;
+        private bool _debugShowVectors = true;
+        
+        // === BENCHMARK MODE ===
+        private bool _benchmarkMode;
+        private int _benchmarkFrameTarget = 400; // Total de frames a simular
+        private int _benchmarkPhase = 0; // 0=idle, 1=walk, 2=jump, 3=walk outro lado
 
-        public CompanionWindow()
+        public CompanionWindow() : this(false) { }
+        
+        public CompanionWindow(bool benchmarkMode)
         {
+            _benchmarkMode = benchmarkMode;
+            
             string assetDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets\\player");
             _body = LoadSprite(assetDirectory, "BodyA");
             _hips = LoadSprite(assetDirectory, "HipsA");
@@ -774,34 +789,21 @@ namespace SlugcatDesktop
             _trayIcon.Visible = true;
             _trayIcon.DoubleClick += delegate { Visible = !Visible; };
 
-            // === DEBUG MODE SETUP ===
-            if (DebugMode)
-            {
-                _debugFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug_frames");
-                if (Directory.Exists(_debugFolder))
-                    Directory.Delete(_debugFolder, true);
-                Directory.CreateDirectory(_debugFolder);
-                _debugFont = new Font("Consolas", 8f, FontStyle.Regular);
-                _debugBrush = new SolidBrush(Color.Lime);
-                _debugBgBrush = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
-            }
-
             _timer = new System.Windows.Forms.Timer();
             _timer.Interval = 16;
             _timer.Tick += OnFrame;
             _clock.Start();
             _timer.Start();
 
-            // === DEBUG MODE SETUP ===
+            // === DEBUG SETUP ===
             if (DebugMode)
             {
                 _debugFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug_frames");
                 if (Directory.Exists(_debugFolder))
                     Directory.Delete(_debugFolder, true);
                 Directory.CreateDirectory(_debugFolder);
-                _debugFont = new Font("Consolas", 9f, FontStyle.Regular);
-                _debugBrush = new SolidBrush(Color.Lime);
-                _debugBgBrush = new SolidBrush(Color.FromArgb(180, 0, 0, 0));
+                _debugFont = new Font("Consolas", 9f, FontStyle.Bold);
+                _debugFontSmall = new Font("Consolas", 7f);
                 KeyPreview = true;
             }
         }
@@ -811,10 +813,11 @@ namespace SlugcatDesktop
             base.OnKeyDown(e);
             if (DebugMode)
             {
-                if (e.KeyCode == Keys.Space)
-                    _debugCapturePaused = !_debugCapturePaused;
-                else if (e.KeyCode == Keys.Escape)
-                    Close();
+                if (e.KeyCode == Keys.Space) _debugCapturePaused = !_debugCapturePaused;
+                if (e.KeyCode == Keys.B) _debugShowBounds = !_debugShowBounds;
+                if (e.KeyCode == Keys.O) _debugShowOrder = !_debugShowOrder;
+                if (e.KeyCode == Keys.V) _debugShowVectors = !_debugShowVectors;
+                if (e.KeyCode == Keys.Escape) Close();
             }
         }
 
@@ -851,6 +854,17 @@ namespace SlugcatDesktop
 
         private void OnFrame(object sender, EventArgs e)
         {
+            // Benchmark: controla fases e fecha quando terminar
+            if (_benchmarkMode)
+            {
+                RunBenchmarkPhase();
+                if (_debugFrameCounter >= _benchmarkFrameTarget)
+                {
+                    Close();
+                    return;
+                }
+            }
+            
             double elapsed = _clock.Elapsed.TotalSeconds;
             _clock.Restart();
             _accumulator += (float)Math.Min(elapsed, 0.08);
@@ -880,6 +894,46 @@ namespace SlugcatDesktop
             Invalidate();
         }
 
+        private void RunBenchmarkPhase()
+        {
+            // Fases do benchmark para testar diferentes estados
+            // 0-100: idle (parado)
+            // 100-200: walking direita
+            // 200-250: jump
+            // 250-350: walking esquerda  
+            // 350-400: idle final
+            
+            int frame = _debugFrameCounter;
+            
+            if (frame == 0)
+            {
+                // Reset para estado inicial
+                _simulation.Facing = 1f;
+                _simulation.LookX = 1f;
+            }
+            else if (frame == 100)
+            {
+                // Força walking para direita via reflexão do estado interno
+                _benchmarkPhase = 1;
+            }
+            else if (frame == 200)
+            {
+                // Jump
+                _simulation.RequestJump();
+                _benchmarkPhase = 2;
+            }
+            else if (frame == 250)
+            {
+                // Walking esquerda
+                _benchmarkPhase = 3;
+            }
+            else if (frame == 350)
+            {
+                // Idle final
+                _benchmarkPhase = 4;
+            }
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             try
@@ -897,7 +951,7 @@ namespace SlugcatDesktop
         {
             g.Clear(KeyColor);
             
-            // === DEBUG: Background preto para ver melhor ===
+            // Debug: fundo preto
             if (DebugMode)
                 g.FillRectangle(Brushes.Black, 0, 0, ClientSize.Width, ClientSize.Height);
             
@@ -916,125 +970,315 @@ namespace SlugcatDesktop
             float upperAngle = (float)(Math.Atan2(upperAxis.X, upperAxis.Y) * 180.0 / Math.PI);
             float lowerAngle = (float)(Math.Atan2(lowerAxis.X, lowerAxis.Y) * 180.0 / Math.PI);
 
-            // Ordem corrigida: pernas -> braco traseiro -> quadril -> corpo -> rabo -> braco frontal -> cabeca -> rosto
+            // Ordem (Rain World original): braco traseiro -> corpo -> rabo -> pernas -> quadril -> braco frontal -> cabeca -> rosto
             int backArmIndex = _simulation.Facing > 0 ? 1 : 0;
             int frontArmIndex = _simulation.Facing > 0 ? 0 : 1;
 
-            // 1. Pernas (back-most)
-            DrawSprite(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
-                0f, false, 0.5f, 0.25f);
+            // === DESENHO COM DEBUG ===
+            // Ordem correta Rain World: Pernas -> BracoTras -> Quadril -> Corpo -> Rabo -> BracoFrente -> Cabeca -> Rosto
+            int drawOrder = 0;
 
-            // 2. Braco traseiro
-            DrawArm(g, backArmIndex, false, centerX, floorY);
+            // 1. Pernas (mais atrás de tudo)
+            // Âncora: centro horizontal (0.5), topo do sprite (1.0) para conectar ao corpo
+            drawOrder++;
+            DrawSpriteDebug(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
+                0f, false, 0.5f, 0.75f, drawOrder, "Legs", Color.Lime);
+
+            // 2. Braço traseiro
+            drawOrder++;
+            DrawArmDebug(g, backArmIndex, false, centerX, floorY, drawOrder, "BackArm");
 
             // 3. Quadril
-            DrawSprite(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
-                false, 0.5f, 0.7894737f);
+            drawOrder++;
+            DrawSpriteDebug(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
+                false, 0.5f, 0.7894737f, drawOrder, "Hips", Color.Orange);
 
             // 4. Corpo
-            DrawSprite(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
-                false, 0.5f, 0.7894737f);
+            drawOrder++;
+            DrawSpriteDebug(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
+                false, 0.5f, 0.7894737f, drawOrder, "Body", Color.Cyan);
 
             // 5. Rabo
+            drawOrder++;
             DrawTail(g, anchor, centerX, floorY);
+            if (DebugMode && _debugShowOrder)
+                DrawOrderLabel(g, ToScreen(anchor, centerX, floorY), drawOrder, "Tail", Color.Yellow);
 
-            // 6. Braco frontal
-            DrawArm(g, frontArmIndex, true, centerX, floorY);
+            // 6. Braço frontal
+            drawOrder++;
+            DrawArmDebug(g, frontArmIndex, true, centerX, floorY, drawOrder, "FrontArm");
 
+            // 7. Cabeça
+            drawOrder++;
             Vec2 headPos = _simulation.HeadPos;
-            DrawSprite(g, _heads[_simulation.HeadFrame], ToScreen(headPos, centerX, floorY),
-                upperAngle * 0.35f, _simulation.Facing < 0f);
+            DrawSpriteDebug(g, _heads[_simulation.HeadFrame], ToScreen(headPos, centerX, floorY),
+                upperAngle * 0.35f, _simulation.Facing < 0f, 0.5f, 0.5f, drawOrder, "Head", Color.Red);
 
+            // 8. Rosto
+            drawOrder++;
             Vec2 facePos = headPos + new Vec2(_simulation.LookX * 2.2f, -2f + _simulation.LookY * 1.5f);
-            DrawSprite(g, _faces[_simulation.FaceFrame], ToScreen(facePos, centerX, floorY),
-                upperAngle * 0.35f, _simulation.Facing < 0f);
+            DrawSpriteDebug(g, _faces[_simulation.FaceFrame], ToScreen(facePos, centerX, floorY),
+                upperAngle * 0.35f, _simulation.Facing < 0f, 0.5f, 0.5f, drawOrder, "Face", Color.Magenta);
 
             // === DEBUG OVERLAY ===
             if (DebugMode)
             {
-                DrawDebugOverlay(g, rig, centerX, floorY, upperAngle, lowerAngle);
+                DrawDebugVectors(g, rig, centerX, floorY);
+                DrawDebugPanel(g, rig, upperAngle, lowerAngle);
                 
                 _debugFrameCounter++;
-                if (!_debugCapturePaused && _debugFrameCounter % _debugCaptureInterval == 0)
+                if (!_debugCapturePaused && _debugFrameCounter % DebugCaptureInterval == 0)
                     CaptureDebugFrame();
             }
         }
 
-        private void DrawDebugOverlay(Graphics g, BodyRig rig, float centerX, float floorY, float upperAngle, float lowerAngle)
+        private void DrawSpriteDebug(Graphics g, Bitmap sprite, PointF anchor, float angle, bool flipX,
+            float anchorX, float anchorY, int order, string name, Color debugColor)
         {
-            // Desenha marcadores nos chunks
-            PointF chunk0Screen = ToScreen(_simulation.Chunks[0].Pos, centerX, floorY);
-            PointF chunk1Screen = ToScreen(_simulation.Chunks[1].Pos, centerX, floorY);
-            g.FillEllipse(Brushes.Red, chunk0Screen.X - 4, chunk0Screen.Y - 4, 8, 8);
-            g.FillEllipse(Brushes.Blue, chunk1Screen.X - 4, chunk1Screen.Y - 4, 8, 8);
+            // Desenha o sprite normalmente
+            DrawSprite(g, sprite, anchor, angle, flipX, anchorX, anchorY);
             
-            // Desenha marcadores no rabo
+            if (!DebugMode) return;
+            
+            // Debug: ponto de âncora
+            using (SolidBrush b = new SolidBrush(debugColor))
+                g.FillEllipse(b, anchor.X - 3, anchor.Y - 3, 6, 6);
+            
+            // Debug: label de ordem
+            if (_debugShowOrder)
+                DrawOrderLabel(g, anchor, order, name, debugColor);
+            
+            // Debug: bounding box aproximada
+            if (_debugShowBounds)
+            {
+                int w = sprite.Width * PixelScale;
+                int h = sprite.Height * PixelScale;
+                using (Pen p = new Pen(debugColor, 1f))
+                {
+                    p.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
+                    g.DrawRectangle(p, anchor.X - w/2, anchor.Y - h/2, w, h);
+                }
+            }
+        }
+
+        private void DrawArmDebug(Graphics g, int index, bool front, float centerX, float floorY, int order, string name)
+        {
+            Vec2 shoulder, hand;
+            _simulation.GetArm(index, front, out shoulder, out hand);
+
+            int frame = SlugcatSimulation.ArmFrameForLength(Vec2.Distance(shoulder, hand));
+            PointF ps = ToScreen(shoulder, centerX, floorY);
+            PointF ph = ToScreen(hand, centerX, floorY);
+
+            float dx = hand.X - shoulder.X;
+            float dy = hand.Y - shoulder.Y;
+            float angle = (float)(Math.Atan2(dx, dy) * 180.0 / Math.PI) + 90f;
+
+            DrawSprite(g, _arms[frame], ph, angle, false, 0.9f, 0.5f);
+            
+            if (!DebugMode) return;
+            
+            Color col = front ? Color.Magenta : Color.Cyan;
+            
+            // Ombro
+            using (SolidBrush b = new SolidBrush(Color.Cyan))
+                g.FillEllipse(b, ps.X - 4, ps.Y - 4, 8, 8);
+            
+            // Mão
+            using (SolidBrush b = new SolidBrush(Color.Magenta))
+                g.FillEllipse(b, ph.X - 4, ph.Y - 4, 8, 8);
+            
+            // Linha ombro->mão
+            if (_debugShowVectors)
+            {
+                using (Pen p = new Pen(Color.White, 1f))
+                    g.DrawLine(p, ps, ph);
+            }
+            
+            // Label
+            if (_debugShowOrder)
+            {
+                string label = string.Format("{0}.{1} f{2} d{3:F0}", order, name, frame, Vec2.Distance(shoulder, hand));
+                DrawOrderLabel(g, ps, order, label, col);
+            }
+        }
+
+        private void DrawOrderLabel(Graphics g, PointF pos, int order, string name, Color color)
+        {
+            string text = string.Format("{0}.{1}", order, name);
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(180, 0, 0, 0)))
+            using (SolidBrush fg = new SolidBrush(color))
+            {
+                SizeF size = g.MeasureString(text, _debugFontSmall);
+                g.FillRectangle(bg, pos.X + 5, pos.Y - 10, size.Width + 2, size.Height);
+                g.DrawString(text, _debugFontSmall, fg, pos.X + 6, pos.Y - 10);
+            }
+        }
+
+        private void DrawDebugVectors(Graphics g, BodyRig rig, float centerX, float floorY)
+        {
+            if (!_debugShowVectors) return;
+            
+            // Chunks
+            PointF c0 = ToScreen(_simulation.Chunks[0].Pos, centerX, floorY);
+            PointF c1 = ToScreen(_simulation.Chunks[1].Pos, centerX, floorY);
+            g.FillEllipse(Brushes.Red, c0.X - 5, c0.Y - 5, 10, 10);
+            g.FillEllipse(Brushes.Blue, c1.X - 5, c1.Y - 5, 10, 10);
+            g.DrawLine(Pens.White, c0, c1);
+            
+            // Rig points
+            PointF waist = ToScreen(rig.Waist, centerX, floorY);
+            PointF belly = ToScreen(rig.Belly, centerX, floorY);
+            PointF neck = ToScreen(rig.Neck, centerX, floorY);
+            g.FillEllipse(Brushes.Green, belly.X - 3, belly.Y - 3, 6, 6);
+            
+            // Tail segments
+            PointF tailAnchor = ToScreen(_simulation.TailAnchor, centerX, floorY);
+            g.FillEllipse(Brushes.Orange, tailAnchor.X - 4, tailAnchor.Y - 4, 8, 8);
+            PointF prev = tailAnchor;
             for (int i = 0; i < _simulation.Tail.Length; i++)
             {
-                PointF tailScreen = ToScreen(_simulation.Tail[i].Pos, centerX, floorY);
-                g.FillEllipse(Brushes.Yellow, tailScreen.X - 2, tailScreen.Y - 2, 4, 4);
+                PointF tp = ToScreen(_simulation.Tail[i].Pos, centerX, floorY);
+                g.FillEllipse(Brushes.Yellow, tp.X - 3, tp.Y - 3, 6, 6);
+                g.DrawLine(Pens.Yellow, prev, tp);
+                prev = tp;
             }
+        }
+
+        private void DrawDebugPanel(Graphics g, BodyRig rig, float upperAngle, float lowerAngle)
+        {
+            Vec2 shoulder0, hand0, shoulder1, hand1;
+            _simulation.GetArm(0, true, out shoulder0, out hand0);
+            _simulation.GetArm(1, false, out shoulder1, out hand1);
             
-            // Desenha marcadores nos ombros e mãos
-            for (int idx = 0; idx < 2; idx++)
+            string[] lines = new string[]
             {
-                Vec2 shoulder, hand;
-                _simulation.GetArm(idx, idx == 0, out shoulder, out hand);
-                PointF shoulderScreen = ToScreen(shoulder, centerX, floorY);
-                PointF handScreen = ToScreen(hand, centerX, floorY);
-                g.FillEllipse(Brushes.Cyan, shoulderScreen.X - 3, shoulderScreen.Y - 3, 6, 6);
-                g.FillEllipse(Brushes.Magenta, handScreen.X - 3, handScreen.Y - 3, 6, 6);
-                g.DrawLine(Pens.White, shoulderScreen, handScreen);
+                "=== SLUGCAT DEBUG v25 ===",
+                string.Format("Frame:{0} Capture:{1}", _debugFrameCounter, _debugCapturePaused ? "PAUSED" : "ON"),
+                string.Format("Facing:{0:F1} Walk:{1} Spd:{2:F2}", _simulation.Facing, _simulation.Walking, _simulation.WalkSpeed),
+                "",
+                "--- Z-ORDER (back to front) ---",
+                "1.Legs 2.BackArm 3.Hips 4.Body",
+                "5.Tail 6.FrontArm 7.Head 8.Face",
+                "",
+                "--- POSITIONS ---",
+                string.Format("Chunk0(red): {0:F1},{1:F1}", _simulation.Chunks[0].Pos.X, _simulation.Chunks[0].Pos.Y),
+                string.Format("Chunk1(blue): {0:F1},{1:F1}", _simulation.Chunks[1].Pos.X, _simulation.Chunks[1].Pos.Y),
+                string.Format("LegsPos: {0:F1},{1:F1}", _simulation.LegsPos.X, _simulation.LegsPos.Y),
+                "",
+                "--- ARMS ---",
+                string.Format("Arm0: sh({0:F0},{1:F0}) hd({2:F0},{3:F0}) d={4:F0}", 
+                    shoulder0.X, shoulder0.Y, hand0.X, hand0.Y, Vec2.Distance(shoulder0, hand0)),
+                string.Format("Arm1: sh({0:F0},{1:F0}) hd({2:F0},{3:F0}) d={4:F0}",
+                    shoulder1.X, shoulder1.Y, hand1.X, hand1.Y, Vec2.Distance(shoulder1, hand1)),
+                "",
+                "--- KEYS ---",
+                "[B] Bounds  [O] Order  [V] Vectors",
+                "[SPACE] Pause capture  [ESC] Exit"
+            };
+            
+            using (SolidBrush bg = new SolidBrush(Color.FromArgb(200, 0, 0, 0)))
+            using (SolidBrush fg = new SolidBrush(Color.Lime))
+            {
+                float y = 8;
+                float maxW = 0;
+                foreach (string line in lines)
+                {
+                    SizeF sz = g.MeasureString(line, _debugFont);
+                    if (sz.Width > maxW) maxW = sz.Width;
+                }
+                g.FillRectangle(bg, 5, 5, maxW + 15, lines.Length * 14 + 10);
+                foreach (string line in lines)
+                {
+                    g.DrawString(line, _debugFont, fg, 10, y);
+                    y += 14;
+                }
             }
-            
-            // Painel de informações
-            string info = string.Format(
-                "=== SLUGCAT DEBUG v22 ===\n" +
-                "Frame: {0}  Captura: {1}\n" +
-                "Facing: {2:F2}  LookX: {3:F2}  LookY: {4:F2}\n" +
-                "Walking: {5}  WalkSpeed: {6:F2}\n\n" +
-                "--- CHUNKS ---\n" +
-                "Chunk0: Pos({7:F1},{8:F1}) Vel({9:F2},{10:F2})\n" +
-                "Chunk1: Pos({11:F1},{12:F1}) Vel({13:F2},{14:F2})\n\n" +
-                "--- ANGLES ---\n" +
-                "Upper: {15:F1}°  Lower: {16:F1}°\n" +
-                "HeadFrame: {17}  LegsFrame: {18}\n\n" +
-                "--- TAIL ---\n" +
-                "Seg0: R={19:F2}  Seg1: R={20:F2}\n" +
-                "Seg2: R={21:F2}  Seg3: R={22:F2}\n\n" +
-                "[SPACE] Pausar captura  [ESC] Sair",
-                _debugFrameCounter, _debugCapturePaused ? "PAUSADO" : "ATIVO",
-                _simulation.Facing, _simulation.LookX, _simulation.LookY,
-                _simulation.Walking, _simulation.WalkSpeed,
-                _simulation.Chunks[0].Pos.X, _simulation.Chunks[0].Pos.Y,
-                _simulation.Chunks[0].Vel.X, _simulation.Chunks[0].Vel.Y,
-                _simulation.Chunks[1].Pos.X, _simulation.Chunks[1].Pos.Y,
-                _simulation.Chunks[1].Vel.X, _simulation.Chunks[1].Vel.Y,
-                upperAngle, lowerAngle,
-                _simulation.HeadFrame, _simulation.LegsFrame,
-                _simulation.Tail[0].StretchedRadius, _simulation.Tail[1].StretchedRadius,
-                _simulation.Tail[2].StretchedRadius, _simulation.Tail[3].StretchedRadius);
-            
-            // Desenha fundo e texto
-            SizeF textSize = g.MeasureString(info, _debugFont);
-            g.FillRectangle(_debugBgBrush, 5, 5, textSize.Width + 10, textSize.Height + 10);
-            g.DrawString(info, _debugFont, _debugBrush, 10, 10);
         }
 
         private void CaptureDebugFrame()
         {
             try
             {
+                // Salva imagem PNG
                 using (Bitmap bmp = new Bitmap(ClientSize.Width, ClientSize.Height))
                 {
                     DrawToBitmap(bmp, new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
                     string filename = Path.Combine(_debugFolder, string.Format("frame_{0:D6}.png", _debugFrameCounter));
                     bmp.Save(filename, ImageFormat.Png);
                 }
+                
+                // Salva dados estruturados em JSON para análise automatizada
+                SaveFrameData();
             }
             catch (Exception ex)
             {
                 Log.Error("CaptureDebugFrame", ex);
+            }
+        }
+
+        private void SaveFrameData()
+        {
+            try
+            {
+                Vec2 shoulder0, hand0, shoulder1, hand1;
+                _simulation.GetArm(0, true, out shoulder0, out hand0);
+                _simulation.GetArm(1, false, out shoulder1, out hand1);
+                
+                // Formato JSON manual (sem dependência de biblioteca)
+                string json = string.Format(@"{{
+  ""frame"": {0},
+  ""state"": {{
+    ""facing"": {1:F2},
+    ""walking"": {2},
+    ""walkSpeed"": {3:F2},
+    ""lookX"": {4:F2},
+    ""lookY"": {5:F2}
+  }},
+  ""chunks"": {{
+    ""head"": {{ ""x"": {6:F1}, ""y"": {7:F1}, ""vx"": {8:F2}, ""vy"": {9:F2} }},
+    ""body"": {{ ""x"": {10:F1}, ""y"": {11:F1}, ""vx"": {12:F2}, ""vy"": {13:F2} }}
+  }},
+  ""arms"": {{
+    ""arm0"": {{ ""shoulder"": {{ ""x"": {14:F1}, ""y"": {15:F1} }}, ""hand"": {{ ""x"": {16:F1}, ""y"": {17:F1} }}, ""distance"": {18:F1} }},
+    ""arm1"": {{ ""shoulder"": {{ ""x"": {19:F1}, ""y"": {20:F1} }}, ""hand"": {{ ""x"": {21:F1}, ""y"": {22:F1} }}, ""distance"": {23:F1} }}
+  }},
+  ""legs"": {{ ""x"": {24:F1}, ""y"": {25:F1}, ""frame"": {26} }},
+  ""head"": {{ ""x"": {27:F1}, ""y"": {28:F1}, ""frame"": {29} }},
+  ""tail"": [
+    {{ ""x"": {30:F1}, ""y"": {31:F1}, ""radius"": {32:F2} }},
+    {{ ""x"": {33:F1}, ""y"": {34:F1}, ""radius"": {35:F2} }},
+    {{ ""x"": {36:F1}, ""y"": {37:F1}, ""radius"": {38:F2} }},
+    {{ ""x"": {39:F1}, ""y"": {40:F1}, ""radius"": {41:F2} }}
+  ],
+  ""issues"": []
+}}",
+                    _debugFrameCounter,
+                    _simulation.Facing,
+                    _simulation.Walking.ToString().ToLower(),
+                    _simulation.WalkSpeed,
+                    _simulation.LookX,
+                    _simulation.LookY,
+                    _simulation.Chunks[0].Pos.X, _simulation.Chunks[0].Pos.Y,
+                    _simulation.Chunks[0].Vel.X, _simulation.Chunks[0].Vel.Y,
+                    _simulation.Chunks[1].Pos.X, _simulation.Chunks[1].Pos.Y,
+                    _simulation.Chunks[1].Vel.X, _simulation.Chunks[1].Vel.Y,
+                    shoulder0.X, shoulder0.Y, hand0.X, hand0.Y, Vec2.Distance(shoulder0, hand0),
+                    shoulder1.X, shoulder1.Y, hand1.X, hand1.Y, Vec2.Distance(shoulder1, hand1),
+                    _simulation.LegsPos.X, _simulation.LegsPos.Y, _simulation.LegsFrame,
+                    _simulation.HeadPos.X, _simulation.HeadPos.Y, _simulation.HeadFrame,
+                    _simulation.Tail[0].Pos.X, _simulation.Tail[0].Pos.Y, _simulation.Tail[0].StretchedRadius,
+                    _simulation.Tail[1].Pos.X, _simulation.Tail[1].Pos.Y, _simulation.Tail[1].StretchedRadius,
+                    _simulation.Tail[2].Pos.X, _simulation.Tail[2].Pos.Y, _simulation.Tail[2].StretchedRadius,
+                    _simulation.Tail[3].Pos.X, _simulation.Tail[3].Pos.Y, _simulation.Tail[3].StretchedRadius
+                );
+                
+                string jsonFile = Path.Combine(_debugFolder, string.Format("frame_{0:D6}.json", _debugFrameCounter));
+                File.WriteAllText(jsonFile, json);
+            }
+            catch (Exception ex)
+            {
+                Log.Error("SaveFrameData", ex);
             }
         }
 
@@ -1061,19 +1305,61 @@ namespace SlugcatDesktop
 
         private void DrawTail(Graphics g, Vec2 anchor, float centerX, float floorY)
         {
-            // Desenha circulos pixelados em vez de poligono suave para manter estilo pixel-art
-            PointF anchorScreen = ToScreen(anchor, centerX, floorY);
-            float anchorRadius = _simulation.Tail[0].StretchedRadius * PixelScale * 0.8f;
-            g.FillEllipse(_whiteBrush, anchorScreen.X - anchorRadius, anchorScreen.Y - anchorRadius,
-                anchorRadius * 2, anchorRadius * 2);
-
+            int count = _simulation.Tail.Length + 1;
+            Vec2[] centerline = _tailCL;
+            float[] radii = _tailR;
+            centerline[0] = anchor;
+            const float renderWidthScale = 0.72f;
+            radii[0] = _simulation.Tail[0].StretchedRadius * renderWidthScale;
             for (int i = 0; i < _simulation.Tail.Length; i++)
             {
-                TailSegment seg = _simulation.Tail[i];
-                PointF pos = ToScreen(seg.Pos, centerX, floorY);
-                float radius = seg.StretchedRadius * PixelScale;
-                g.FillEllipse(_whiteBrush, pos.X - radius, pos.Y - radius, radius * 2, radius * 2);
+                centerline[i + 1] = _simulation.Tail[i].Pos;
+                radii[i + 1] = i == _simulation.Tail.Length - 1
+                    ? 0f
+                    : _simulation.Tail[i].StretchedRadius * renderWidthScale;
             }
+
+            // Interpolate between the four simulated tail segments before outlining them.
+            const int curveSteps = 5;
+            int smoothCount = (count - 1) * curveSteps + 1;
+            Vec2[] smoothLine = _tailSmooth;
+            float[] smoothRadii = _tailSmoothR;
+            int sample = 0;
+            for (int i = 0; i < count - 1; i++)
+            {
+                Vec2 p0 = centerline[Math.Max(0, i - 1)];
+                Vec2 p1 = centerline[i];
+                Vec2 p2 = centerline[i + 1];
+                Vec2 p3 = centerline[Math.Min(count - 1, i + 2)];
+                for (int step = 0; step < curveSteps; step++)
+                {
+                    float t = step / (float)curveSteps;
+                    smoothLine[sample] = CatmullRom(p0, p1, p2, p3, t);
+                    smoothRadii[sample] = radii[i] + (radii[i + 1] - radii[i]) * t;
+                    sample++;
+                }
+            }
+            smoothLine[sample] = centerline[count - 1];
+            smoothRadii[sample] = radii[count - 1];
+
+            Point[] outline = _tailOutline;
+            for (int i = 0; i < smoothCount; i++)
+            {
+                Vec2 tangent = i == 0
+                    ? smoothLine[1] - smoothLine[0]
+                    : i == smoothCount - 1
+                        ? smoothLine[i] - smoothLine[i - 1]
+                        : smoothLine[i + 1] - smoothLine[i - 1];
+                tangent = tangent.Normalized;
+                if (tangent.Length < 0.001f)
+                    tangent = new Vec2(-_simulation.Facing, 0f);
+                Vec2 normal = new Vec2(-tangent.Y, tangent.X);
+                outline[i] = RoundPoint(ToScreen(smoothLine[i] + normal * smoothRadii[i], centerX, floorY));
+                outline[smoothCount * 2 - 1 - i] = RoundPoint(
+                    ToScreen(smoothLine[i] - normal * smoothRadii[i], centerX, floorY));
+            }
+
+            g.FillPolygon(_whiteBrush, outline);
         }
 
         private static Vec2 CatmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t)
@@ -1115,7 +1401,7 @@ namespace SlugcatDesktop
             int width = sprite.Width * PixelScale;
             int height = sprite.Height * PixelScale;
             int left = (int)Math.Round(-width * anchorX);
-            int top = (int)Math.Round(-height * (1f - anchorY));
+            int top = (int)Math.Round(-height * anchorY);
             g.DrawImage(sprite, new Rectangle(left, top, width, height),
                 0, 0, sprite.Width, sprite.Height, GraphicsUnit.Pixel);
             g.Restore(state);
