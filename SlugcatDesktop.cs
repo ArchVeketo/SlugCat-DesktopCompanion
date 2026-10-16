@@ -133,6 +133,67 @@ namespace SlugcatDesktop
     }
 
     /// <summary>
+    /// Parte generica do corpo com fisica propria (inercia, velocidade, conexao elastica).
+    /// Baseado no GenericBodyPart do Rain World original.
+    /// </summary>
+    internal sealed class GenericBodyPart
+    {
+        public Vec2 Pos;
+        public Vec2 LastPos;
+        public Vec2 Vel;
+        public float Rad;
+
+        public GenericBodyPart(float rad, Vec2 pos)
+        {
+            Rad = rad;
+            Pos = pos;
+            LastPos = pos;
+            Vel = new Vec2(0f, 0f);
+        }
+
+        /// <summary>
+        /// Atualiza fisica: inercia + atrito do ar.
+        /// </summary>
+        public void Update(float airFriction)
+        {
+            LastPos = Pos;
+            Pos = Pos + Vel;
+            Vel = Vel * airFriction;
+        }
+
+        /// <summary>
+        /// Conecta esta parte a um ponto-alvo com distancia maxima.
+        /// Se a distancia exceder connectionRad, reposiciona e aplica push na velocidade.
+        /// </summary>
+        public void ConnectToPoint(Vec2 target, float connectionRad, float push)
+        {
+            Vec2 diff = Pos - target;
+            float dist = diff.Length;
+            if (dist > connectionRad && dist > 0.0001f)
+            {
+                Vec2 dir = diff / dist;
+                Pos = target + dir * connectionRad;
+                if (push > 0f)
+                    Vel = Vel + dir * (dist - connectionRad) * push;
+            }
+        }
+
+        /// <summary>
+        /// Colisao com chao (y=0).
+        /// </summary>
+        public void PushOutOfFloor(float floorY = 0f)
+        {
+            if (Pos.Y < floorY + Rad * 0.5f)
+            {
+                Pos.Y = floorY + Rad * 0.5f;
+                if (Vel.Y < 0f)
+                    Vel.Y = -Vel.Y * 0.1f;
+                Vel.X *= 0.9f;
+            }
+        }
+    }
+
+    /// <summary>
     /// A small standalone simulation of the vanilla Survivor's body chunks and tail.
     /// Terrain and room-dependent behaviors are replaced by a flat desktop floor.
     /// </summary>
@@ -150,6 +211,10 @@ namespace SlugcatDesktop
         // Metade da largura do mundo em unidades de simulação (definida pela janela a partir do monitor).
         public float WorldHalfWidth = 60f;
 
+        // Constantes para fisica das pernas (escaladas para sprite maior)
+        private const float LegsAirFriction = 0.99f;
+        private const float LegsConnectRad = 7f;
+
         public readonly BodyChunk[] Chunks;
         public readonly TailSegment[] Tail;
         private Vec2 _bellyPos;
@@ -158,6 +223,8 @@ namespace SlugcatDesktop
         public Vec2 HeadLastPos;
         public Vec2 HeadVel;
         public Vec2 LegsPos;
+        public GenericBodyPart Legs;
+        public Vec2 LegsDirection;
         public float Facing = 1f;
         public float LookX = 1f;
         public float LookY = 0f;
@@ -214,7 +281,13 @@ namespace SlugcatDesktop
 
             HeadPos = Chunks[0].Pos + new Vec2(0f, 5f);
             HeadLastPos = HeadPos;
-            LegsPos = Chunks[1].Pos + new Vec2(0f, -2f);
+            
+            // Pernas como GenericBodyPart real (fisica igual ao jogo)
+            Vec2 hipPos = Chunks[1].Pos;
+            Legs = new GenericBodyPart(2f, hipPos + new Vec2(0f, -2f));
+            LegsDirection = new Vec2(0f, -1f);
+            LegsPos = Legs.Pos;
+            
             _blinkCounter = _random.Next(40, 180);
         }
 
@@ -256,6 +329,12 @@ namespace SlugcatDesktop
             {
                 TailSegment t = Tail[i];
                 if (Bad(t.Pos.X) || Bad(t.Pos.Y) || Bad(t.Vel.X) || Bad(t.Vel.Y) || Bad(t.StretchedRadius))
+                    return false;
+            }
+            // Verifica GenericBodyPart Legs
+            if (Legs != null)
+            {
+                if (Bad(Legs.Pos.X) || Bad(Legs.Pos.Y) || Bad(Legs.Vel.X) || Bad(Legs.Vel.Y))
                     return false;
             }
             return !(Bad(_bellyPos.X) || Bad(_bellyPos.Y) || Bad(HeadPos.X) || Bad(HeadPos.Y)
@@ -323,15 +402,76 @@ namespace SlugcatDesktop
             UpdateArms();
             UpdateFacialExpression();
             UpdateTail();
+            UpdateLegs();
+        }
 
-            // Sincronização de pernas com velocidade real
-            float stepLift = 0f;
-            if (Walking && WalkSpeed > 0.05f)
+        /// <summary>
+        /// Atualiza fisica das pernas com inercia real (igual ao GenericBodyPart do jogo).
+        /// </summary>
+        private void UpdateLegs()
+        {
+            // 1. Atualiza fisica (inercia + atrito)
+            Legs.Update(LegsAirFriction);
+            
+            // 2. Gravidade leve nas pernas
+            Legs.Vel.Y -= Gravity * 0.3f;
+            
+            // 3. Conecta ao quadril (Chunk[1])
+            Vec2 hipPos = Chunks[1].Pos;
+            Legs.ConnectToPoint(hipPos, LegsConnectRad, 0.5f);
+            
+            // 4. Colisao com chao
+            Legs.PushOutOfFloor();
+            
+            // 5. Atualiza legsDirection baseado no bodyMode/movimento
+            UpdateLegsDirection();
+            
+            // 6. Forca as pernas a seguirem a direcao desejada (suavemente)
+            Vec2 targetPos = hipPos + LegsDirection * 5f;
+            Legs.Vel = Legs.Vel + (targetPos - Legs.Pos) * 0.08f;
+            
+            // 7. Sincroniza LegsPos para compatibilidade com codigo existente
+            LegsPos = Legs.Pos;
+        }
+
+        /// <summary>
+        /// Atualiza a direcao das pernas conforme o movimento e estado.
+        /// </summary>
+        private void UpdateLegsDirection()
+        {
+            // No chao andando: pernas apontam ligeiramente para tras (oposto a direcao)
+            if (Walking && IsOnGround())
             {
-                float stepFreq = 0.35f * Clamp(WalkSpeed / 0.8f, 0.5f, 1.5f);
-                stepLift = (float)Math.Abs(Math.Sin(WalkPhase * stepFreq)) * 1.3f;
+                float targetX = -Facing * 0.3f;
+                LegsDirection.X = LegsDirection.X + (targetX - LegsDirection.X) * 0.1f;
+                LegsDirection.Y = -0.9f;
             }
-            LegsPos = Chunks[1].Pos + new Vec2(0f, -2f + stepLift);
+            // No ar (pulando/caindo): pernas apontam para baixo e ligeiramente para tras
+            else if (!IsOnGround())
+            {
+                float fallSpeed = -Chunks[1].Vel.Y;
+                if (fallSpeed > 2f)
+                {
+                    LegsDirection.X = LegsDirection.X * 0.95f;
+                    LegsDirection.Y = -1f;
+                }
+                else if (Chunks[1].Vel.Y > 2f)
+                {
+                    LegsDirection.X = Facing * 0.2f;
+                    LegsDirection.Y = -0.8f;
+                }
+            }
+            // Parado: pernas retas para baixo
+            else
+            {
+                LegsDirection.X = LegsDirection.X * 0.92f;
+                LegsDirection.Y = -1f;
+            }
+            
+            // Normaliza
+            LegsDirection = LegsDirection.Normalized;
+            if (LegsDirection.Length < 0.001f)
+                LegsDirection = new Vec2(0f, -1f);
         }
 
         private void UpdateBehavior()
@@ -645,7 +785,20 @@ namespace SlugcatDesktop
 
         public int LegsFrame
         {
-            get { return Walking && WalkSpeed > 0.08f ? ((int)(WalkPhase / 5f) % 7) : 0; }
+            get
+            {
+                if (!Walking || WalkSpeed < 0.08f)
+                    return 0;
+                
+                // Usa a posicao horizontal relativa das pernas para determinar o frame
+                float legOffset = Legs.Pos.X - Chunks[1].Pos.X;
+                float normalizedOffset = legOffset / LegsConnectRad;
+                
+                // Combina com WalkPhase para animacao suave
+                float phase = (float)Math.Sin(WalkPhase * 0.35f);
+                int frame = (int)Math.Round((phase + 1f) * 3f);
+                return Clamp(frame, 0, 6);
+            }
         }
 
         public int HeadFrame
@@ -717,7 +870,7 @@ namespace SlugcatDesktop
         private static readonly SolidBrush _whiteBrush = new SolidBrush(Color.White);
 
         // === DEBUG MODE ===
-        private const bool DebugMode = false; // Debug mode
+        private const bool DebugMode = true; // Debug mode
         private int _debugFrameCounter;
         private const int DebugCaptureInterval = 10; // Captura mais frequente no benchmark
         private string _debugFolder;
@@ -991,12 +1144,12 @@ namespace SlugcatDesktop
             // 3. Quadril
             drawOrder++;
             DrawSpriteDebug(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
-                false, 0.5f, 0.7894737f, drawOrder, "Hips", Color.Orange);
+                false, 0.5f, 0.5f, drawOrder, "Hips", Color.Orange);
 
             // 4. Corpo
             drawOrder++;
             DrawSpriteDebug(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
-                false, 0.5f, 0.7894737f, drawOrder, "Body", Color.Cyan);
+                false, 0.5f, 0.2105263f, drawOrder, "Body", Color.Cyan);
 
             // 5. Rabo
             drawOrder++;
@@ -1400,6 +1553,7 @@ namespace SlugcatDesktop
 
             int width = sprite.Width * PixelScale;
             int height = sprite.Height * PixelScale;
+            // Anchor semantics (matching slugcatpet): anchorY=0.75 means 75% of sprite height ABOVE the draw point
             int left = (int)Math.Round(-width * anchorX);
             int top = (int)Math.Round(-height * anchorY);
             g.DrawImage(sprite, new Rectangle(left, top, width, height),
