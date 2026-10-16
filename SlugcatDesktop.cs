@@ -460,6 +460,12 @@ namespace SlugcatDesktop
                     LegsDirection.X = Facing * 0.2f;
                     LegsDirection.Y = -0.8f;
                 }
+                else
+                {
+                    // Velocidade baixa no ar (flutuando): pernas retas para baixo
+                    LegsDirection.X = LegsDirection.X * 0.95f;
+                    LegsDirection.Y = -1f;
+                }
             }
             // Parado: pernas retas para baixo
             else
@@ -790,11 +796,7 @@ namespace SlugcatDesktop
                 if (!Walking || WalkSpeed < 0.08f)
                     return 0;
                 
-                // Usa a posicao horizontal relativa das pernas para determinar o frame
-                float legOffset = Legs.Pos.X - Chunks[1].Pos.X;
-                float normalizedOffset = legOffset / LegsConnectRad;
-                
-                // Combina com WalkPhase para animacao suave
+                // Frame baseado em WalkPhase para animacao suave
                 float phase = (float)Math.Sin(WalkPhase * 0.35f);
                 int frame = (int)Math.Round((phase + 1f) * 3f);
                 return Clamp(frame, 0, 6);
