@@ -77,6 +77,7 @@ namespace SlugcatDesktop
         private readonly NotifyIcon _trayIcon;
         private readonly ContextMenuStrip _menu;
         private readonly Bitmap _body;
+        private Bitmap _bodyPadded; // textura de BodyA com borda replicada (prova de conceito da malha)
         private readonly Bitmap _hips;
         private readonly Bitmap[] _heads = new Bitmap[18];
         private readonly Bitmap[] _faces = new Bitmap[9];
@@ -98,6 +99,12 @@ namespace SlugcatDesktop
 
         // === DEBUG MODE ===
         private const bool DebugMode = false; // Debug mode desativado para release
+
+        // === PROVA DE CONCEITO DA MALHA (FEAT-002) ===
+        // Quando true, desenha UM quad de BodyA deformado via DrawTexturedTriangle
+        // (2 triangulos) para validar o warp afim + clipping. NAO alterar no release.
+        private const bool MeshProofOfConcept = false;
+        private bool _meshProofCaptured; // garante uma unica gravacao do snapshot isolado
         private int _debugFrameCounter;
         private const int DebugCaptureInterval = 10; // Captura mais frequente no benchmark
         private string _debugFolder;
@@ -402,6 +409,10 @@ namespace SlugcatDesktop
             DrawSpriteDebug(g, _faces[_simulation.FaceFrame], ToScreen(facePos, centerX, floorY),
                 upperAngle * 0.35f, _simulation.Facing < 0f, 0.5f, 0.5f, drawOrder, "Face", Color.Magenta);
 
+            // Prova de conceito da malha (FEAT-002): quad de BodyA deformado via warp afim.
+            if (MeshProofOfConcept)
+                DrawMeshProofOfConcept(g, centerX, floorY);
+
             // === DEBUG OVERLAY ===
             if (DebugMode)
             {
@@ -411,6 +422,106 @@ namespace SlugcatDesktop
                 _debugFrameCounter++;
                 if (!_debugCapturePaused && _debugFrameCounter % DebugCaptureInterval == 0)
                     CaptureDebugFrame();
+            }
+        }
+
+        /// <summary>
+        /// Prova de conceito da malha (FEAT-002): desenha o sprite BodyA como UM quad
+        /// deformado manualmente em 2 triangulos via MeshRenderer.DrawTexturedTriangle.
+        /// Valida o warp afim (textura esticada/cisalhada) e o clipping por triangulo,
+        /// sem buraco nem costura. Le o estado SO via IPhysicsProvider; nao altera a fisica.
+        /// Ativa apenas sob a flag MeshProofOfConcept; nao faz parte do release.
+        /// </summary>
+        private void DrawMeshProofOfConcept(Graphics g, float centerX, float floorY)
+        {
+            if (_body == null)
+                return;
+
+            // Textura com borda replicada (sob demanda, cacheada) para evitar costura.
+            if (_bodyPadded == null)
+                _bodyPadded = MeshRenderer.PadTexture(_body);
+
+            int largura = _body.Width;
+            int altura = _body.Height;
+
+            // UVs = cantos do retangulo da textura original, ja deslocados +1px por causa
+            // da borda replicada do PadTexture. Ordem por triangulo: TL, TR, BL / TR, BR, BL.
+            PointF uvTL = new PointF(1f, 1f);
+            PointF uvTR = new PointF(1f + largura, 1f);
+            PointF uvBL = new PointF(1f, 1f + altura);
+            PointF uvBR = new PointF(1f + largura, 1f + altura);
+
+            // Quad de destino deformado (trapezio cisalhado) ancorado no tronco (chunk 0).
+            // Deslocamentos manuais provam que a textura estica e cisalha, nao so rotaciona.
+            PointF centro = ToScreen(_simulation.Chunks[0].Pos, centerX, floorY);
+            float esc = PixelScale;
+
+            PointF dTL = new PointF(centro.X - 10f * esc, centro.Y - 12f * esc);
+            PointF dTR = new PointF(centro.X + 14f * esc, centro.Y - 6f * esc);  // topo mais estreito e inclinado
+            PointF dBL = new PointF(centro.X - 14f * esc, centro.Y + 12f * esc); // base mais larga
+            PointF dBR = new PointF(centro.X + 10f * esc, centro.Y + 8f * esc);
+
+            // Triangulo A: TL, TR, BL. Triangulo B: TR, BR, BL. Juntos cobrem o quad sem buraco.
+            MeshRenderer.DrawTexturedTriangle(g, _bodyPadded, uvTL, uvTR, uvBL, dTL, dTR, dBL);
+            MeshRenderer.DrawTexturedTriangle(g, _bodyPadded, uvTR, uvBR, uvBL, dTR, dBR, dBL);
+
+            // Captura isolada (uma vez) para inspecao limpa do warp: mesma deformacao
+            // num recorte proprio, sem sprites rigidos nem overlays por cima. Usa uma
+            // textura de xadrez para evidenciar estiramento/cisalhamento e ausencia de costura.
+            if (DebugMode && !_meshProofCaptured)
+            {
+                _meshProofCaptured = true;
+                SaveMeshProofSnapshot();
+            }
+        }
+
+        /// <summary>
+        /// Grava um PNG isolado (debug_frames\mesh_proof.png) com o mesmo quad deformado
+        /// desenhado sobre fundo preto, usando uma textura de xadrez para que o warp afim
+        /// e as costuras fiquem obvios a olho nu. So roda com a prova de conceito ativa.
+        /// </summary>
+        private void SaveMeshProofSnapshot()
+        {
+            if (string.IsNullOrEmpty(_debugFolder))
+                return;
+
+            // Textura de xadrez 14x19 (mesmas dimensoes de BodyA) com borda replicada.
+            using (Bitmap xadrez = new Bitmap(14, 19, PixelFormat.Format32bppArgb))
+            {
+                for (int y = 0; y < xadrez.Height; y++)
+                    for (int x = 0; x < xadrez.Width; x++)
+                    {
+                        bool claro = ((x / 2) + (y / 2)) % 2 == 0;
+                        xadrez.SetPixel(x, y, claro ? Color.White : Color.FromArgb(255, 60, 160, 255));
+                    }
+
+                using (Bitmap xadrezPad = MeshRenderer.PadTexture(xadrez))
+                using (Bitmap destino = new Bitmap(240, 214, PixelFormat.Format32bppArgb))
+                using (Graphics g = Graphics.FromImage(destino))
+                {
+                    g.Clear(Color.Black);
+                    g.SmoothingMode = SmoothingMode.None;
+                    g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                    g.PixelOffsetMode = PixelOffsetMode.Half;
+
+                    int w = xadrez.Width;
+                    int h = xadrez.Height;
+                    PointF uvTL = new PointF(1f, 1f);
+                    PointF uvTR = new PointF(1f + w, 1f);
+                    PointF uvBL = new PointF(1f, 1f + h);
+                    PointF uvBR = new PointF(1f + w, 1f + h);
+
+                    PointF c = new PointF(120f, 107f);
+                    PointF dTL = new PointF(c.X - 60f, c.Y - 70f);
+                    PointF dTR = new PointF(c.X + 80f, c.Y - 30f);
+                    PointF dBL = new PointF(c.X - 85f, c.Y + 70f);
+                    PointF dBR = new PointF(c.X + 55f, c.Y + 45f);
+
+                    MeshRenderer.DrawTexturedTriangle(g, xadrezPad, uvTL, uvTR, uvBL, dTL, dTR, dBL);
+                    MeshRenderer.DrawTexturedTriangle(g, xadrezPad, uvTR, uvBR, uvBL, dTR, dBR, dBL);
+
+                    destino.Save(Path.Combine(_debugFolder, "mesh_proof.png"), ImageFormat.Png);
+                }
             }
         }
 
@@ -971,6 +1082,8 @@ namespace SlugcatDesktop
             _trayIcon.Dispose();
             _menu.Dispose();
             _body.Dispose();
+            if (_bodyPadded != null)
+                _bodyPadded.Dispose();
             _hips.Dispose();
             for (int i = 0; i < _heads.Length; i++)
                 _heads[i].Dispose();
