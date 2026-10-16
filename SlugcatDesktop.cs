@@ -907,6 +907,16 @@ namespace SlugcatDesktop
                 CheckTailMesh(found);
             }
 
+            // 10 (tronco). Mesma invariante #10 para a grade deformavel do tronco: vertices
+            //     finitos, area nao-nula E sinal consistente entre todos os 6 triangulos.
+            //     Ao contrario da cauda (own/link com winding naturalmente distinto), a grade
+            //     usa um unico padrao de montagem (TL,TR,BL / TR,BR,BL) por quad, logo o sinal
+            //     DEVE ser o mesmo em todos; divergencia = quad invertido/auto-cruzado.
+            if (!BodyMeshFallback)
+            {
+                CheckBodyMesh(found);
+            }
+
             if (found.Count == 0)
                 return string.Empty;
 
@@ -958,6 +968,74 @@ namespace SlugcatDesktop
                     return;
                 }
             }
+        }
+
+        /// <summary>
+        /// Invariante #10 (report §5) aplicada a grade deformavel do tronco. Reconstroi os
+        /// 8 vertices (BuildBodyGrid) e os 6 triangulos exatamente como DrawBodyGrid monta
+        /// (3 quads: TL,TR,BL / TR,BR,BL), em coordenadas de simulacao. Verifica, por
+        /// triangulo: vertices finitos e area nao-nula. Diferente da cauda, aqui TAMBEM
+        /// exige SINAL CONSISTENTE do produto vetorial entre todos os triangulos, pois a
+        /// grade usa um unico padrao de winding por quad; qualquer inversao indica quad
+        /// dobrado/auto-cruzado (buraco ou textura dobrada). Qualquer falha adiciona
+        /// "mesh_degenerate_triangle" a lista.
+        /// </summary>
+        private void CheckBodyMesh(List<string> found)
+        {
+            MeshRenderer.BuildBodyGrid(_simulation.Rig.Neck, _simulation.Rig.Belly,
+                _simulation.Rig.Waist, BodyHalfWidthPx, BodyAnchorTopPx, _bodyGridVerts);
+
+            float sinalRef = 0f; // 0 = ainda nao definido
+
+            for (int r = 0; r < 3; r++)
+            {
+                int tl = r * 2;
+                int tr = r * 2 + 1;
+                int bl = (r + 1) * 2;
+                int br = (r + 1) * 2 + 1;
+
+                // Mesmos dois triangulos de DrawBodyGrid: (TL,TR,BL) e (TR,BR,BL).
+                if (!VerificaTrianguloTronco(found, _bodyGridVerts[tl], _bodyGridVerts[tr], _bodyGridVerts[bl], ref sinalRef))
+                    return;
+                if (!VerificaTrianguloTronco(found, _bodyGridVerts[tr], _bodyGridVerts[br], _bodyGridVerts[bl], ref sinalRef))
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// Valida um triangulo da grade do tronco: vertices finitos, area nao-nula e sinal
+        /// do produto vetorial coerente com os triangulos anteriores (<paramref name="sinalRef"/>).
+        /// Retorna false (e registra o issue) na primeira violacao.
+        /// </summary>
+        private static bool VerificaTrianguloTronco(List<string> found, Vec2 a, Vec2 b, Vec2 c, ref float sinalRef)
+        {
+            if (!MeshRenderer.IsFinite(a) || !MeshRenderer.IsFinite(b) || !MeshRenderer.IsFinite(c))
+            {
+                found.Add("mesh_degenerate_triangle (vertice nao-finito no tronco)");
+                return false;
+            }
+
+            float cross = (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+
+            if (Math.Abs(cross) < 1e-4f)
+            {
+                found.Add("mesh_degenerate_triangle (area nula no tronco)");
+                return false;
+            }
+
+            float sinal = cross > 0f ? 1f : -1f;
+
+            if (sinalRef == 0f)
+            {
+                sinalRef = sinal;
+            }
+            else if (sinal != sinalRef)
+            {
+                found.Add("mesh_degenerate_triangle (triangulo invertido no tronco)");
+                return false;
+            }
+
+            return true;
         }
 
         private static void CheckArm(List<string> found, string name, float dist)
