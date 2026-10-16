@@ -9,6 +9,11 @@ assets/player/*.png
 build_out.txt
 build_err.txt
 
+# Frames do loop visual (gerados pelo benchmark) — nao versionar
+debug_frames/
+# PNGs de baseline (so os .json de referencia sao versionados)
+baseline/**/*.png
+
 # Log de runtime
 log.txt
 
