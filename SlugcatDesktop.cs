@@ -107,6 +107,21 @@ namespace SlugcatDesktop
         // (FillPolygon branco) em vez da malha texturizada. Padrao: malha (false).
         private const bool TailMeshFallback = false;
 
+        // Buffers da grade do tronco (FEAT-004). Grade 1 coluna x 3 linhas de quads =>
+        // 4 fileiras x 2 colunas = 8 vertices. Pre-alocado para evitar GC a 60 FPS.
+        private readonly Vec2[] _bodyGridVerts = new Vec2[8];
+        private Bitmap _bodyGridPadded; // BodyA com borda replicada (textura da grade)
+
+        // Fallback: quando true, o tronco volta ao DrawSprite rigido (DrawImage/Rectangle)
+        // em vez da grade deformavel. Padrao: grade (false).
+        private const bool BodyMeshFallback = false;
+
+        // Ancoragem do sprite BodyA no rig (identica a ponte rigida substituida):
+        // anchorY=4/19 => a fileira Neck fica a 4px do topo; a fileira de topo (cap)
+        // estende os 4px restantes acima de Neck. halfWidth = largura/2 = 7px.
+        private const float BodyAnchorTopPx = 4f;   // 0.2105263 * 19
+        private const float BodyHalfWidthPx = 7f;   // 14 / 2
+
         // === DEBUG MODE ===
         private const bool DebugMode = false; // Debug mode desativado para release
 
@@ -374,34 +389,35 @@ namespace SlugcatDesktop
             int frontArmIndex = _simulation.Facing > 0 ? 0 : 1;
 
             // === DESENHO COM DEBUG ===
-            // Ordem correta Rain World: Pernas -> BracoTras -> Quadril -> Corpo -> Rabo -> BracoFrente -> Cabeca -> Rosto
+            // Z-order canonico (spec/README, fundo -> frente): braco traseiro -> corpo ->
+            // cauda -> pernas -> quadril -> braco frontal -> cabeca -> rosto. FEAT-004 (7.2)
+            // alinhou a sequencia ao canonico (antes intercalava pernas/quadril atras do corpo).
             int drawOrder = 0;
 
-            // 1. Pernas (mais atrás de tudo)
-            // Âncora: centro horizontal (0.5), topo do sprite (1.0) para conectar ao corpo
-            drawOrder++;
-            DrawSpriteDebug(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
-                0f, false, 0.5f, 0.75f, drawOrder, "Legs", Color.Lime);
-
-            // 2. Braço traseiro
+            // 1. Braço traseiro (mais atrás de tudo)
             drawOrder++;
             DrawArmDebug(g, backArmIndex, false, centerX, floorY, drawOrder, "BackArm");
 
-            // 3. Quadril
+            // 2. Corpo (grade deformavel)
             drawOrder++;
-            DrawSpriteDebug(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
-                false, 0.5f, 0.5f, drawOrder, "Hips", Color.Orange);
+            DrawBody(g, rig, upperAngle, centerX, floorY, drawOrder);
 
-            // 4. Corpo
-            drawOrder++;
-            DrawSpriteDebug(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
-                false, 0.5f, 0.2105263f, drawOrder, "Body", Color.Cyan);
-
-            // 5. Rabo
+            // 3. Rabo
             drawOrder++;
             DrawTail(g, anchor, centerX, floorY);
             if (DebugMode && _debugShowOrder)
                 DrawOrderLabel(g, ToScreen(anchor, centerX, floorY), drawOrder, "Tail", Color.Yellow);
+
+            // 4. Pernas
+            // Âncora: centro horizontal (0.5), topo do sprite (0.75) para conectar ao corpo
+            drawOrder++;
+            DrawSpriteDebug(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
+                0f, false, 0.5f, 0.75f, drawOrder, "Legs", Color.Lime);
+
+            // 5. Quadril
+            drawOrder++;
+            DrawSpriteDebug(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
+                false, 0.5f, 0.5f, drawOrder, "Hips", Color.Orange);
 
             // 6. Braço frontal
             drawOrder++;
@@ -661,8 +677,8 @@ namespace SlugcatDesktop
                 string.Format("Facing:{0:F1} Walk:{1} Spd:{2:F2}", _simulation.Facing, _simulation.Walking, _simulation.WalkSpeed),
                 "",
                 "--- Z-ORDER (back to front) ---",
-                "1.Legs 2.BackArm 3.Hips 4.Body",
-                "5.Tail 6.FrontArm 7.Head 8.Face",
+                "1.BackArm 2.Body 3.Tail 4.Legs",
+                "5.Hips 6.FrontArm 7.Head 8.Face",
                 "",
                 "--- POSITIONS ---",
                 string.Format("Chunk0(red): {0:F1},{1:F1}", _simulation.Chunks[0].Pos.X, _simulation.Chunks[0].Pos.Y),
@@ -1111,6 +1127,118 @@ namespace SlugcatDesktop
             g.FillPolygon(_whiteBrush, outline);
         }
 
+        /// <summary>
+        /// Desenha o tronco. Despacha para a grade deformavel (FEAT-004) ou, com
+        /// BodyMeshFallback=true, para a ponte rigida antiga (DrawSpriteDebug). Em ambos
+        /// os caminhos preserva os overlays de DebugMode (ancora, ordem, bounding box).
+        /// </summary>
+        private void DrawBody(Graphics g, BodyRig rig, float upperAngle, float centerX, float floorY, int order)
+        {
+            if (BodyMeshFallback)
+            {
+                DrawSpriteDebug(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
+                    false, 0.5f, 0.2105263f, order, "Body", Color.Cyan);
+                return;
+            }
+
+            DrawBodyGrid(g, rig, centerX, floorY);
+
+            if (DebugMode)
+                DrawBodyGridOverlay(g, rig, order, centerX, floorY);
+        }
+
+        /// <summary>
+        /// Desenha o sprite BodyA como grade deformavel 1x3 (FEAT-004), substituindo a
+        /// ponte rigida DrawSprite. Monta 8 vertices em simulacao via MeshRenderer.BuildBodyGrid
+        /// (fileiras presas a cap/Neck/Belly/Waist), warpa 3 quads (6 triangulos) de BodyA
+        /// via DrawTexturedTriangle, convertendo cada vertice com ToScreen. Ao inclinar/andar,
+        /// o tronco DOBRA entre torax e quadril porque cada fileira segue a tangente local.
+        /// Le o estado SO via IPhysicsProvider; nao altera a fisica. Distancia Neck-Waist
+        /// (~17px, invariante da mola) e preservada porque os vertices vem direto do rig.
+        /// </summary>
+        private void DrawBodyGrid(Graphics g, BodyRig rig, float centerX, float floorY)
+        {
+            if (_body == null)
+                return;
+
+            // Textura do tronco: BodyA com borda replicada (evita costura entre quads).
+            if (_bodyGridPadded == null)
+                _bodyGridPadded = MeshRenderer.PadTexture(_body);
+
+            MeshRenderer.BuildBodyGrid(rig.Neck, rig.Belly, rig.Waist,
+                BodyHalfWidthPx, BodyAnchorTopPx, _bodyGridVerts);
+
+            // UV (px da textura, +1px pela borda replicada do PadTexture). Largura cheia
+            // do sprite entre as colunas; as fileiras repartem a altura em cap/Neck/Belly/Waist.
+            float texLargura = _body.Width;   // 14
+            float texAltura = _body.Height;   // 19
+            float uEsq = 1f;
+            float uDir = 1f + texLargura;
+            // v por fileira: cap=topo(0), Neck=4px, Belly=meio do trecho abaixo de Neck, Waist=base.
+            float vCap = 1f;
+            float vNeck = 1f + BodyAnchorTopPx;
+            float vWaist = 1f + texAltura;
+            float vBelly = vNeck + (vWaist - vNeck) * 0.5f;
+            float[] vFileira = { vCap, vNeck, vBelly, vWaist };
+
+            // 3 quads (fileira r -> r+1); 2 triangulos por quad (TL,TR,BL / TR,BR,BL),
+            // UVs = cantos de um sub-retangulo da textura -> warp afim fiel (FEAT-002).
+            for (int r = 0; r < 3; r++)
+            {
+                int tl = r * 2;        // topo esquerda
+                int tr = r * 2 + 1;    // topo direita
+                int bl = (r + 1) * 2;  // base esquerda
+                int br = (r + 1) * 2 + 1; // base direita
+
+                PointF uvTL = new PointF(uEsq, vFileira[r]);
+                PointF uvTR = new PointF(uDir, vFileira[r]);
+                PointF uvBL = new PointF(uEsq, vFileira[r + 1]);
+                PointF uvBR = new PointF(uDir, vFileira[r + 1]);
+
+                PointF dTL = ToScreen(_bodyGridVerts[tl], centerX, floorY);
+                PointF dTR = ToScreen(_bodyGridVerts[tr], centerX, floorY);
+                PointF dBL = ToScreen(_bodyGridVerts[bl], centerX, floorY);
+                PointF dBR = ToScreen(_bodyGridVerts[br], centerX, floorY);
+
+                MeshRenderer.DrawTexturedTriangle(g, _bodyGridPadded, uvTL, uvTR, uvBL, dTL, dTR, dBL);
+                MeshRenderer.DrawTexturedTriangle(g, _bodyGridPadded, uvTR, uvBR, uvBL, dTR, dBR, dBL);
+            }
+        }
+
+        /// <summary>
+        /// Overlay de DebugMode do tronco (equivalente ao de DrawSpriteDebug): ponto de
+        /// ancora em Neck, label de ordem e contorno da grade deformada (nao a bounding
+        /// box rigida, para evidenciar a dobra). So roda com DebugMode ligado.
+        /// </summary>
+        private void DrawBodyGridOverlay(Graphics g, BodyRig rig, int order, float centerX, float floorY)
+        {
+            PointF anchor = ToScreen(rig.Neck, centerX, floorY);
+            using (SolidBrush b = new SolidBrush(Color.Cyan))
+                g.FillEllipse(b, anchor.X - 3, anchor.Y - 3, 6, 6);
+
+            if (_debugShowOrder)
+                DrawOrderLabel(g, anchor, order, "Body", Color.Cyan);
+
+            if (_debugShowBounds)
+            {
+                // Contorno da grade: esquerda (fileiras 0..3) + direita (3..0), fechando.
+                Point[] contorno = new Point[8];
+                contorno[0] = RoundPoint(ToScreen(_bodyGridVerts[0], centerX, floorY));
+                contorno[1] = RoundPoint(ToScreen(_bodyGridVerts[2], centerX, floorY));
+                contorno[2] = RoundPoint(ToScreen(_bodyGridVerts[4], centerX, floorY));
+                contorno[3] = RoundPoint(ToScreen(_bodyGridVerts[6], centerX, floorY));
+                contorno[4] = RoundPoint(ToScreen(_bodyGridVerts[7], centerX, floorY));
+                contorno[5] = RoundPoint(ToScreen(_bodyGridVerts[5], centerX, floorY));
+                contorno[6] = RoundPoint(ToScreen(_bodyGridVerts[3], centerX, floorY));
+                contorno[7] = RoundPoint(ToScreen(_bodyGridVerts[1], centerX, floorY));
+                using (Pen p = new Pen(Color.Cyan, 1f))
+                {
+                    p.DashStyle = DashStyle.Dot;
+                    g.DrawPolygon(p, contorno);
+                }
+            }
+        }
+
         private static Vec2 CatmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t)
         {
             float t2 = t * t;
@@ -1213,6 +1341,8 @@ namespace SlugcatDesktop
                 _bodyPadded.Dispose();
             if (_tailPadded != null)
                 _tailPadded.Dispose();
+            if (_bodyGridPadded != null)
+                _bodyGridPadded.Dispose();
             _hips.Dispose();
             for (int i = 0; i < _heads.Length; i++)
                 _heads[i].Dispose();

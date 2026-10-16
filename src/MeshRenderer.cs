@@ -10,7 +10,7 @@ namespace SlugcatDesktop
     /// Contem os helpers de FW 4.0 (sem Math.Clamp, sem MathF) e o nucleo da malha:
     /// DrawTexturedTriangle (+ guard IsDegenerate) e PadTexture (borda replicada).
     /// Montagem da malha da cauda: BuildTailVertices/BuildTailTriangles (FEAT-003).
-    /// A grade do tronco (BuildBodyGrid) entra em FEAT seguinte.
+    /// Grade deformavel do tronco: BuildBodyGrid (FEAT-004).
     /// </summary>
     internal static class MeshRenderer
     {
@@ -248,6 +248,66 @@ namespace SlugcatDesktop
             }
 
             return idx;
+        }
+
+        /// <summary>
+        /// Monta a grade deformavel do tronco em coordenadas de SIMULACAO (Y-para-cima).
+        /// Grade minima de 1 coluna x 3 linhas de quads => 4 cross-bars (fileiras de 2
+        /// vertices cada), presas ao rig fisico: fileira de topo (cap) acima de Neck,
+        /// fileira 1 em Neck (torax), fileira 2 em Belly (pivo com sway), fileira de base
+        /// em Waist (quadril). Como cada fileira segue a tangente LOCAL do spine, o tronco
+        /// DOBRA/cisalha entre torax e quadril em vez de so rotacionar (ao contrario do
+        /// DrawSprite rigido). A conversao Y-para-baixo fica a cargo do chamador via ToScreen.
+        /// Layout de saida (8 vertices): indice = fileira*2 + coluna, coluna 0 = esquerda
+        /// (perpendicular negativa), coluna 1 = direita. Fileiras 0..3 = cap, Neck, Belly, Waist.
+        /// </summary>
+        /// <param name="neck">rig.Neck = Chunks[0] (torax, acima), em simulacao.</param>
+        /// <param name="belly">rig.Belly (pivo intermediario com sway), em simulacao.</param>
+        /// <param name="waist">rig.Waist = Chunks[1] (quadril, abaixo), em simulacao.</param>
+        /// <param name="halfWidth">Metade da largura do sprite ao longo da perpendicular (px de simulacao).</param>
+        /// <param name="topCap">Quanto a fileira de topo se estende acima de Neck ao longo do spine (px).</param>
+        /// <param name="destino">Buffer de saida com pelo menos 8 posicoes.</param>
+        /// <returns>Quantidade de vertices escritos (8).</returns>
+        public static int BuildBodyGrid(Vec2 neck, Vec2 belly, Vec2 waist, float halfWidth, float topCap, Vec2[] destino)
+        {
+            // Tangentes locais do spine (apontando "para cima", de baixo para o topo).
+            Vec2 tangenteSuperior = Normalizar(neck - belly, new Vec2(0f, 1f));   // Belly -> Neck
+            Vec2 tangenteInferior = Normalizar(belly - waist, new Vec2(0f, 1f));  // Waist -> Belly
+
+            // Centro de cada fileira (presa ao rig; o cap estende acima de Neck).
+            Vec2 cCap = neck + tangenteSuperior * topCap;
+            Vec2 cNeck = neck;
+            Vec2 cBelly = belly;
+            Vec2 cWaist = waist;
+
+            // Perpendicular por fileira (gira junto com a tangente local -> cisalhamento).
+            // Perp = (tangente.Y, -tangente.X): aponta para um lado consistente do spine.
+            Vec2 perpSuperior = new Vec2(tangenteSuperior.Y, -tangenteSuperior.X);
+            Vec2 perpBelly = Normalizar(
+                new Vec2(tangenteSuperior.Y + tangenteInferior.Y, -(tangenteSuperior.X + tangenteInferior.X)),
+                perpSuperior);
+            Vec2 perpInferior = new Vec2(tangenteInferior.Y, -tangenteInferior.X);
+
+            EmitirFileira(destino, 0, cCap, perpSuperior, halfWidth);
+            EmitirFileira(destino, 1, cNeck, perpSuperior, halfWidth);
+            EmitirFileira(destino, 2, cBelly, perpBelly, halfWidth);
+            EmitirFileira(destino, 3, cWaist, perpInferior, halfWidth);
+
+            return 8;
+        }
+
+        /// <summary>Escreve o par esquerda/direita de uma fileira (centro +/- perp*halfWidth).</summary>
+        private static void EmitirFileira(Vec2[] destino, int fileira, Vec2 centro, Vec2 perpendicular, float halfWidth)
+        {
+            destino[fileira * 2] = centro - perpendicular * halfWidth;      // coluna 0 (esquerda)
+            destino[fileira * 2 + 1] = centro + perpendicular * halfWidth;  // coluna 1 (direita)
+        }
+
+        /// <summary>Normaliza com fallback quando o vetor e curto demais (evita divisao por ~0).</summary>
+        private static Vec2 Normalizar(Vec2 v, Vec2 fallback)
+        {
+            float len = v.Length;
+            return len > EpsilonComprimento ? v / len : fallback;
         }
 
         /// <summary>Retangulo-fonte (bounding) que cobre os tres cantos UV.</summary>
