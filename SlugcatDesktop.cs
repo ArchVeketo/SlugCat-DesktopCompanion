@@ -8,6 +8,28 @@ using System.Windows.Forms;
 
 namespace SlugcatDesktop
 {
+    internal static class Log
+    {
+        private static int _count;
+
+        public static void Write(string where, string message)
+        {
+            if (_count++ >= 50)
+                return;
+            try
+            {
+                string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
+                File.AppendAllText(path, DateTime.Now.ToString("s") + " [" + where + "] " + message + "\r\n");
+            }
+            catch { }
+        }
+
+        public static void Error(string where, Exception ex)
+        {
+            Write(where, ex.ToString());
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -15,12 +37,18 @@ namespace SlugcatDesktop
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object s, System.Threading.ThreadExceptionEventArgs e)
+            {
+                Log.Error("ThreadException", e.Exception);
+            };
             try
             {
                 Application.Run(new CompanionWindow());
             }
             catch (Exception ex)
             {
+                Log.Error("Main", ex);
                 MessageBox.Show("O Slugcat Companion não conseguiu iniciar.\r\n\r\n" + ex.Message,
                     "Slugcat Companion", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
@@ -112,6 +140,12 @@ namespace SlugcatDesktop
         public const float SurfaceFriction = 0.5f;
         public const float BodyConnectionDistance = 17f;
 
+        // Com atrito de superfície 0,5 a velocidade de equilíbrio é igual à força aplicada por tick.
+        public const float WalkTargetSpeed = 1.1f;
+
+        // Metade da largura do mundo em unidades de simulação (definida pela janela a partir do monitor).
+        public float WorldHalfWidth = 60f;
+
         public readonly BodyChunk[] Chunks;
         public readonly TailSegment[] Tail;
         private Vec2 _bellyPos;
@@ -133,16 +167,20 @@ namespace SlugcatDesktop
         private int _direction = 1;
         private bool _jumpRequested;
         private float _walkAcceleration = 0f;
-        
+
         // Expressões faciais e animações
         private int _blinkCounter;
         private int _faceFrame;
         private bool _blinking;
-        
+
         // Braços
-        public Vec2[] ArmPositions = new Vec2[2];
         private float[] _armAngles = new float[2];
         private float _armSwing;
+
+        // Comprimento visível (px) de cada PlayerArmN: 28 - spriteSourceSize.x do atlas.
+        // O ombro fica na borda direita do sprite; a mão fica à esquerda.
+        private static readonly float[] ArmLengths =
+            { 5f, 5f, 6f, 8f, 10f, 12f, 14f, 17f, 19f, 21f, 24f, 28f, 28f };
 
         public SlugcatSimulation()
         {
@@ -171,10 +209,6 @@ namespace SlugcatDesktop
             HeadPos = Chunks[0].Pos + new Vec2(0f, 5f);
             HeadLastPos = HeadPos;
             LegsPos = Chunks[1].Pos + new Vec2(0f, -2f);
-            
-            // Inicializa braços
-            ArmPositions[0] = Chunks[0].Pos + new Vec2(-3f, 0f);
-            ArmPositions[1] = Chunks[0].Pos + new Vec2(3f, 0f);
             _blinkCounter = _random.Next(40, 180);
         }
 
@@ -198,6 +232,30 @@ namespace SlugcatDesktop
             _jumpRequested = true;
         }
 
+        private static bool Bad(float value)
+        {
+            return float.IsNaN(value) || float.IsInfinity(value) || Math.Abs(value) > 10000f;
+        }
+
+        /// <summary>Detecta NaN/infinito/valores absurdos que fariam o GDI+ lançar exceção ao desenhar.</summary>
+        public bool IsStateValid()
+        {
+            for (int i = 0; i < Chunks.Length; i++)
+            {
+                BodyChunk c = Chunks[i];
+                if (Bad(c.Pos.X) || Bad(c.Pos.Y) || Bad(c.Vel.X) || Bad(c.Vel.Y))
+                    return false;
+            }
+            for (int i = 0; i < Tail.Length; i++)
+            {
+                TailSegment t = Tail[i];
+                if (Bad(t.Pos.X) || Bad(t.Pos.Y) || Bad(t.Vel.X) || Bad(t.Vel.Y) || Bad(t.StretchedRadius))
+                    return false;
+            }
+            return !(Bad(_bellyPos.X) || Bad(_bellyPos.Y) || Bad(HeadPos.X) || Bad(HeadPos.Y)
+                || Bad(LookX) || Bad(LookY) || Bad(WalkPhase) || Bad(_armAngles[0]) || Bad(_armAngles[1]));
+        }
+
         public void Tick()
         {
             UpdateBehavior();
@@ -205,20 +263,24 @@ namespace SlugcatDesktop
             if (_jumpRequested)
             {
                 _jumpRequested = false;
-                Chunks[0].Vel.Y += 7.5f;
-                Chunks[1].Vel.Y += 7.5f;
-                Chunks[0].Vel.X += Facing * 1.25f;
-                Chunks[1].Vel.X += Facing * 1.25f;
-                Walking = false;
-                _stateTicks = 0;
-                _stateLength = 100;
+                // Só pula com os pés no chão (sem pulo duplo no ar).
+                if (IsOnGround())
+                {
+                    Chunks[0].Vel.Y += 7.5f;
+                    Chunks[1].Vel.Y += 7.5f;
+                    Chunks[0].Vel.X += Facing * 1.25f;
+                    Chunks[1].Vel.X += Facing * 1.25f;
+                    Walking = false;
+                    _stateTicks = 0;
+                    _stateLength = 100;
+                }
             }
 
             if (Walking && IsOnGround())
             {
                 // Aceleração gradual para movimento mais natural
                 _walkAcceleration = Clamp(_walkAcceleration + 0.015f, 0f, 1f);
-                float force = _direction * 0.10f * _walkAcceleration;
+                float force = _direction * WalkTargetSpeed * _walkAcceleration;
                 Chunks[0].Vel.X += force;
                 Chunks[1].Vel.X += force;
                 WalkPhase += 1f;
@@ -237,15 +299,14 @@ namespace SlugcatDesktop
             ResolveBodyConnection();
             MaintainCompanionPose();
 
-            // Detecção de bordas usando largura real da tela (não coordenadas de simulação)
-            // A janela está centralizada, então usamos metade da largura disponível
-            const float screenSimWidth = 60f; // Largura simulada da tela
+            // Bordas do mundo = largura real do monitor (WorldHalfWidth vem da janela)
+            float limit = WorldHalfWidth;
             float bodyX = (Chunks[0].Pos.X + Chunks[1].Pos.X) * 0.5f;
-            if (bodyX < -screenSimWidth || bodyX > screenSimWidth)
+            if (bodyX < -limit || bodyX > limit)
             {
                 _direction = bodyX < 0f ? 1 : -1;
-                Chunks[0].Pos.X = Clamp(Chunks[0].Pos.X, -screenSimWidth, screenSimWidth);
-                Chunks[1].Pos.X = Clamp(Chunks[1].Pos.X, -screenSimWidth, screenSimWidth);
+                Chunks[0].Pos.X = Clamp(Chunks[0].Pos.X, -limit, limit);
+                Chunks[1].Pos.X = Clamp(Chunks[1].Pos.X, -limit, limit);
                 Chunks[0].Vel.X *= -0.25f;
                 Chunks[1].Vel.X *= -0.25f;
             }
@@ -256,11 +317,10 @@ namespace SlugcatDesktop
             UpdateFacialExpression();
             UpdateTail();
 
-            // Melhora sincronização de pernas com velocidade real
+            // Sincronização de pernas com velocidade real
             float stepLift = 0f;
             if (Walking && WalkSpeed > 0.05f)
             {
-                // Ajusta frequência baseada na velocidade para evitar deslizamento
                 float stepFreq = 0.35f * Clamp(WalkSpeed / 0.8f, 0.5f, 1.5f);
                 stepLift = (float)Math.Abs(Math.Sin(WalkPhase * stepFreq)) * 1.3f;
             }
@@ -274,7 +334,8 @@ namespace SlugcatDesktop
             {
                 _stateTicks = 0;
                 Walking = !Walking;
-                _stateLength = Walking ? _random.Next(48, 86) : _random.Next(125, 235);
+                // Caminhadas mais longas (2 a 6 s) para realmente atravessar o monitor
+                _stateLength = Walking ? _random.Next(80, 240) : _random.Next(125, 235);
                 if (Walking)
                     _direction = _random.Next(0, 2) == 0 ? -1 : 1;
                 else if (_random.NextDouble() < 0.42)
@@ -351,8 +412,6 @@ namespace SlugcatDesktop
             if (axis.Y < 0f)
                 axis = axis * -1f;
 
-            // The roomless companion cannot use terrain and leg contacts to keep its torso upright.
-            // Limit lean to a small stance angle on the floor and a wider angle while airborne.
             float maxLean = grounded ? (Walking ? 0.03f : 0.06f) : 0.18f;
             float horizontal = Clamp(axis.X, -maxLean, maxLean);
             float vertical = (float)Math.Sqrt(Math.Max(0f, 1f - horizontal * horizontal));
@@ -367,52 +426,38 @@ namespace SlugcatDesktop
         {
             BodyRig rig = Rig;
             Vec2 bodyAxis = (rig.Neck - rig.Belly).Normalized;
-            
-            // SAFE: Verifica se bodyAxis é válido
-            if (float.IsNaN(bodyAxis.X) || float.IsNaN(bodyAxis.Y))
-                bodyAxis = new Vec2(0f, 1f);
-            
-            // A cabeça segue o pivô do pescoço do rig de três articulações
+
             float lookXClamped = Clamp(LookX, -1f, 1f);
             float lookYClamped = Clamp(LookY, -0.5f, 0.5f);
             Vec2 target = rig.Neck + bodyAxis * 5f + new Vec2(lookXClamped * 0.5f, lookYClamped * 0.3f);
-            
-            // SAFE: Verifica se target é válido
-            if (float.IsNaN(target.X) || float.IsNaN(target.Y))
-                target = rig.Neck + new Vec2(0f, 5f);
-            
+
             HeadLastPos = HeadPos;
 
-            // GenericBodyPart head: inércia, atrito do ar 0.99 e ligação curta ao chunk 0
+            // GenericBodyPart head: inércia, atrito do ar e ligação curta ao chunk 0
             HeadVel = HeadVel + (target - HeadPos) * 0.16f;
             HeadVel.Y -= Gravity * 0.08f;
             HeadVel = HeadVel * 0.82f;
             HeadPos = HeadPos + HeadVel;
-            
+
             Vec2 fromTarget = HeadPos - target;
             if (fromTarget.Length > 1.5f)
                 HeadPos = target + fromTarget.Normalized * 1.5f;
-            
-            // Atualiza direção vertical do olhar baseado em movimento
+
+            // Direção vertical do olhar baseada no movimento
             float targetLookY = 0f;
             if (Chunks[0].Vel.Y > 2f)
-                targetLookY = 0.4f; // Olhando pra cima no pulo
+                targetLookY = 0.4f;
             else if (Chunks[0].Vel.Y < -2f)
-                targetLookY = -0.3f; // Olhando pra baixo caindo
+                targetLookY = -0.3f;
             LookY = Lerp(LookY, targetLookY, 0.1f);
         }
 
         private void UpdateArms()
         {
-            // Braços balançam com a caminhada e seguem o torso
-            BodyRig rig = Rig;
-            Vec2 shoulderPos = Vec2.Lerp(rig.Belly, rig.Neck, 0.65f);
-            
             if (Walking && WalkSpeed > 0.1f)
             {
-                // Balanço alternado dos braços durante caminhada (SIMPLIFICADO)
-                _armSwing += WalkSpeed * 0.15f; // Velocidade reduzida
-                float swing = (float)Math.Sin(_armSwing) * 0.3f; // Amplitude reduzida
+                _armSwing += WalkSpeed * 0.15f;
+                float swing = (float)Math.Sin(_armSwing) * 0.3f;
                 _armAngles[0] = Clamp(swing * Facing, -0.5f, 0.5f);
                 _armAngles[1] = Clamp(-swing * Facing, -0.5f, 0.5f);
             }
@@ -422,17 +467,44 @@ namespace SlugcatDesktop
                 _armAngles[0] = Lerp(_armAngles[0], 0f, 0.15f);
                 _armAngles[1] = Lerp(_armAngles[1], 0f, 0.15f);
             }
-            
-            // Posiciona braços nos ombros (PROTEÇÃO contra NaN)
-            float armSpread = 3f;
-            Vec2 leftArm = shoulderPos + new Vec2(-armSpread, 0f);
-            Vec2 rightArm = shoulderPos + new Vec2(armSpread, 0f);
-            
-            // SAFE: Verifica se posições são válidas
-            if (!float.IsNaN(leftArm.X) && !float.IsNaN(leftArm.Y))
-                ArmPositions[0] = leftArm;
-            if (!float.IsNaN(rightArm.X) && !float.IsNaN(rightArm.Y))
-                ArmPositions[1] = rightArm;
+        }
+
+        // Ombro e mão em coordenadas de simulação (y para cima).
+        // No chão, o braço fica recolhido junto ao torso (como no jogo).
+        public void GetArm(int index, bool front, out Vec2 shoulder, out Vec2 hand)
+        {
+            BodyRig rig = Rig;
+            Vec2 up = (rig.Neck - rig.Waist).Normalized;
+            if (up.Length < 0.001f)
+                up = new Vec2(0f, 1f);
+
+            shoulder = Vec2.Lerp(rig.Belly, rig.Neck, 0.8f)
+                + new Vec2(Facing * (front ? 1.5f : -0.5f), 0f);
+
+            float a = Clamp(_armAngles[index], -0.5f, 0.5f);
+            float cos = (float)Math.Cos(a);
+            float sin = (float)Math.Sin(a);
+            Vec2 down = up * -1f;
+            Vec2 swung = new Vec2(down.X * cos - down.Y * sin, down.X * sin + down.Y * cos);
+
+            hand = shoulder + swung * 6f;
+        }
+
+        // Escolhe o frame cujo comprimento é o mais próximo da distância ombro->mão
+        public static int ArmFrameForLength(float length)
+        {
+            int best = 0;
+            float bestDiff = float.MaxValue;
+            for (int i = 0; i < ArmLengths.Length; i++)
+            {
+                float diff = Math.Abs(ArmLengths[i] - length);
+                if (diff < bestDiff)
+                {
+                    bestDiff = diff;
+                    best = i;
+                }
+            }
+            return best;
         }
 
         private void UpdateFacialExpression()
@@ -443,17 +515,15 @@ namespace SlugcatDesktop
             {
                 if (!_blinking)
                 {
-                    // Começa a piscar
                     _blinking = true;
-                    _faceFrame = _random.Next(1, 4); // FaceA1-3 são olhos fechados/piscando
-                    _blinkCounter = _random.Next(3, 6); // Duração da piscada
+                    _faceFrame = _random.Next(1, 4);
+                    _blinkCounter = _random.Next(3, 6);
                 }
                 else
                 {
-                    // Termina piscada
                     _blinking = false;
-                    _faceFrame = 0; // FaceA0 = olhos abertos
-                    _blinkCounter = _random.Next(80, 220); // Próxima piscada
+                    _faceFrame = 0;
+                    _blinkCounter = _random.Next(80, 220);
                 }
             }
         }
@@ -465,18 +535,12 @@ namespace SlugcatDesktop
             Vec2 bodyAxis = (neck - waist).Normalized;
             Vec2 perpendicular = new Vec2(-bodyAxis.Y, bodyAxis.X);
             Vec2 midpoint = Vec2.Lerp(waist, neck, 0.5f);
-            
-            // Variação mais sutil quando parado, mais pronunciada ao andar
+
             float sway;
             if (Walking)
-            {
                 sway = (float)Math.Sin(WalkPhase * 0.35f) * 0.7f * _walkAcceleration;
-            }
             else
-            {
-                // Respiração suave quando parado
-                sway = (float)Math.Sin(_stateTicks * 0.035f) * 0.2f;
-            }
+                sway = (float)Math.Sin(_stateTicks * 0.035f) * 0.2f; // respiração
             Vec2 target = midpoint + perpendicular * sway;
 
             _bellyVel = _bellyVel + (target - _bellyPos) * 0.18f;
@@ -520,7 +584,6 @@ namespace SlugcatDesktop
                 {
                     Vec2 direction = offset / distance;
                     float excess = distance - segment.ConnectionRadius;
-                    // Corrige física: primeiro segmento mais rígido (share menor), últimos mais flexíveis
                     float share = i == 0 ? 0.6f : 0.5f;
                     segment.Pos = segment.Pos - direction * (excess * share);
                     if (i > 0)
@@ -562,36 +625,22 @@ namespace SlugcatDesktop
         {
             get
             {
-                // SAFE: Sempre retorna frame válido
-                // Usa apenas frames centrais mais estáveis
                 float lookAngle = Clamp(LookX * Facing, -1f, 1f);
                 int frame = (int)((lookAngle + 1f) / 2f * 8f);
-                return Clamp(frame, 0, 8); // Máximo 8 (HeadA0-8)
+                return Clamp(frame, 0, 8);
             }
         }
 
         public int FaceFrame
         {
-            get 
-            { 
-                // SAFE: Sempre retorna frame válido
-                return Clamp(_faceFrame, 0, 8); // Máximo 8 (FaceA0-8)
-            }
-        }
-
-        public int ArmFrame(int index)
-        {
-            // SAFE: Sempre retorna frame válido
-            float angle = Clamp(_armAngles[index], -1f, 1f);
-            int frame = (int)((angle + 1f) / 2f * 12f);
-            return Clamp(frame, 0, 12); // Máximo 12 (PlayerArm0-12)
+            get { return Clamp(_faceFrame, 0, 8); }
         }
 
         private static float Clamp(float value, float min, float max)
         {
             return Math.Max(min, Math.Min(max, value));
         }
-        
+
         private static int Clamp(int value, int min, int max)
         {
             return Math.Max(min, Math.Min(max, value));
@@ -606,11 +655,13 @@ namespace SlugcatDesktop
     internal sealed class CompanionWindow : Form
     {
         private const int PixelScale = 3;
-        private const int WindowWidth = 450; // Aumentado para cobrir mais a tela
+        private const int WindowWidth = 450;
         private const int WindowHeight = 214;
+        private const float EdgeMargin = 28f; // unidades de simulação reservadas para rabo/cabeça nas bordas
         private static readonly Color KeyColor = Color.Fuchsia;
 
-        private readonly SlugcatSimulation _simulation = new SlugcatSimulation();
+        private SlugcatSimulation _simulation = new SlugcatSimulation();
+        private float _worldHalfWidth = 60f;
         private readonly System.Windows.Forms.Timer _timer;
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly NotifyIcon _trayIcon;
@@ -622,26 +673,26 @@ namespace SlugcatDesktop
         private readonly Bitmap[] _legs = new Bitmap[7];
         private readonly Bitmap[] _arms = new Bitmap[13];
         private float _accumulator;
+        
+        // Sistema de drag
+        private bool _dragging;
+        private Point _dragStart;
 
         public CompanionWindow()
         {
             string assetDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets\\player");
             _body = LoadSprite(assetDirectory, "BodyA");
             _hips = LoadSprite(assetDirectory, "HipsA");
-            
-            // Carrega todos os frames de cabeça
+
             for (int i = 0; i < _heads.Length; i++)
                 _heads[i] = LoadSprite(assetDirectory, "HeadA" + i);
-            
-            // Carrega todas as expressões faciais
+
             for (int i = 0; i < _faces.Length; i++)
                 _faces[i] = Tint(LoadSprite(assetDirectory, "FaceA" + i), Color.Black);
-            
-            // Carrega frames de pernas
+
             for (int i = 0; i < _legs.Length; i++)
                 _legs[i] = LoadSprite(assetDirectory, "LegsA" + i);
-            
-            // Carrega frames de braços
+
             for (int i = 0; i < _arms.Length; i++)
                 _arms[i] = LoadSprite(assetDirectory, "PlayerArm" + i);
 
@@ -650,18 +701,25 @@ namespace SlugcatDesktop
             ShowIcon = false;
             TopMost = true;
             StartPosition = FormStartPosition.Manual;
-            
-            // Ocupa toda a largura do monitor primário
-            Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
-            ClientSize = new Size(workArea.Width, WindowHeight);
+
+            // Janela arrastável de 450x214px
+            ClientSize = new Size(WindowWidth, WindowHeight);
             BackColor = KeyColor;
             TransparencyKey = KeyColor;
             DoubleBuffered = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
             Text = "Slugcat Companion";
+            
+            // Inicia centralizado na parte de baixo da tela
+            Rectangle workArea = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(
+                workArea.Left + (workArea.Width - WindowWidth) / 2,
+                workArea.Bottom - WindowHeight
+            );
 
-            // Posiciona na parte de baixo cobrindo toda a largura
-            Location = new Point(workArea.Left, workArea.Bottom - WindowHeight);
+            // As bordas do mundo seguem a largura real da janela
+            _worldHalfWidth = Math.Max(30f, ClientSize.Width * 0.5f / PixelScale - EdgeMargin);
+            _simulation.WorldHalfWidth = _worldHalfWidth;
 
             _menu = new ContextMenuStrip();
             _menu.Items.Add("Dar um pulinho", null, delegate { _simulation.RequestJump(); });
@@ -707,6 +765,13 @@ namespace SlugcatDesktop
             return tinted;
         }
 
+        private void ResetSimulation()
+        {
+            _simulation = new SlugcatSimulation();
+            _simulation.WorldHalfWidth = _worldHalfWidth;
+            _accumulator = 0f;
+        }
+
         private void OnFrame(object sender, EventArgs e)
         {
             double elapsed = _clock.Elapsed.TotalSeconds;
@@ -716,7 +781,22 @@ namespace SlugcatDesktop
             int updates = 0;
             while (_accumulator >= tickSeconds && updates < 4)
             {
-                _simulation.Tick();
+                try
+                {
+                    _simulation.Tick();
+                    if (!_simulation.IsStateValid())
+                    {
+                        Log.Write("Tick", "Estado inválido (NaN/infinito). Simulação reiniciada.");
+                        ResetSimulation();
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error("Tick", ex);
+                    ResetSimulation();
+                    break;
+                }
                 _accumulator -= tickSeconds;
                 updates++;
             }
@@ -725,7 +805,19 @@ namespace SlugcatDesktop
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            Graphics g = e.Graphics;
+            try
+            {
+                DrawScene(e.Graphics);
+            }
+            catch (Exception ex)
+            {
+                // Sem este catch o WinForms desenha um X vermelho e para de pintar o controle.
+                Log.Error("Paint", ex);
+            }
+        }
+
+        private void DrawScene(Graphics g)
+        {
             g.Clear(KeyColor);
             g.SmoothingMode = SmoothingMode.None;
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
@@ -743,61 +835,47 @@ namespace SlugcatDesktop
             Vec2 lowerAxis = (rig.Belly - rig.Waist).Normalized;
             float upperAngle = (float)(Math.Atan2(upperAxis.X, upperAxis.Y) * 180.0 / Math.PI);
             float lowerAngle = (float)(Math.Atan2(lowerAxis.X, lowerAxis.Y) * 180.0 / Math.PI);
-            
-            // Ordem de renderização (de trás pra frente):
-            // 1. Braço de trás
+
+            // Ordem: rabo -> braço de trás -> BodyA -> HipsA -> pernas -> braço da frente -> cabeça -> rosto
             int backArmIndex = _simulation.Facing > 0 ? 1 : 0;
             int frontArmIndex = _simulation.Facing > 0 ? 0 : 1;
-            
-            // SAFE: Verifica arrays antes de usar
-            int backArmFrame = _simulation.ArmFrame(backArmIndex);
-            if (_arms != null && backArmFrame >= 0 && backArmFrame < _arms.Length && _arms[backArmFrame] != null)
-            {
-                DrawSprite(g, _arms[backArmFrame], 
-                    ToScreen(_simulation.ArmPositions[backArmIndex], centerX, floorY), 
-                    0f, _simulation.Facing < 0f, 0.85f, 0.5f);
-            }
-            
-            // 2. Corpo (HipsA e BodyA seguem seus próprios segmentos do rig)
-            DrawSprite(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
-                false, 0.5f, 0.7894737f);
+
+            DrawArm(g, backArmIndex, false, centerX, floorY);
+
             DrawSprite(g, _body, ToScreen(rig.Neck, centerX, floorY), upperAngle,
                 false, 0.5f, 0.7894737f);
+            DrawSprite(g, _hips, ToScreen(rig.Belly, centerX, floorY), lowerAngle,
+                false, 0.5f, 0.7894737f);
 
-            // 3. LegsA ancorada perto dos pés no sprite leaser do jogo
-            int legsFrame = _simulation.LegsFrame;
-            if (_legs != null && legsFrame >= 0 && legsFrame < _legs.Length && _legs[legsFrame] != null)
-            {
-                DrawSprite(g, _legs[legsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
-                    0f, false, 0.5f, 0.25f);
-            }
-            
-            // 4. Braço da frente
-            int frontArmFrame = _simulation.ArmFrame(frontArmIndex);
-            if (_arms != null && frontArmFrame >= 0 && frontArmFrame < _arms.Length && _arms[frontArmFrame] != null)
-            {
-                DrawSprite(g, _arms[frontArmFrame], 
-                    ToScreen(_simulation.ArmPositions[frontArmIndex], centerX, floorY), 
-                    0f, _simulation.Facing < 0f, 0.85f, 0.5f);
-            }
+            DrawSprite(g, _legs[_simulation.LegsFrame], ToScreen(_simulation.LegsPos, centerX, floorY),
+                0f, false, 0.5f, 0.25f);
 
-            // 5. Cabeça (frame dinâmico baseado em direção)
+            DrawArm(g, frontArmIndex, true, centerX, floorY);
+
             Vec2 headPos = _simulation.HeadPos;
-            int headFrame = _simulation.HeadFrame;
-            if (_heads != null && headFrame >= 0 && headFrame < _heads.Length && _heads[headFrame] != null)
-            {
-                DrawSprite(g, _heads[headFrame], ToScreen(headPos, centerX, floorY), 
-                    upperAngle * 0.35f, _simulation.Facing < 0f);
-            }
-            
-            // 6. Rosto (expressão dinâmica)
+            DrawSprite(g, _heads[_simulation.HeadFrame], ToScreen(headPos, centerX, floorY),
+                upperAngle * 0.35f, _simulation.Facing < 0f);
+
             Vec2 facePos = headPos + new Vec2(_simulation.LookX * 2.2f, -2f + _simulation.LookY * 1.5f);
-            int faceFrame = _simulation.FaceFrame;
-            if (_faces != null && faceFrame >= 0 && faceFrame < _faces.Length && _faces[faceFrame] != null)
-            {
-                DrawSprite(g, _faces[faceFrame], ToScreen(facePos, centerX, floorY), 
-                    0f, _simulation.Facing < 0f);
-            }
+            DrawSprite(g, _faces[_simulation.FaceFrame], ToScreen(facePos, centerX, floorY),
+                0f, _simulation.Facing < 0f);
+        }
+
+        private void DrawArm(Graphics g, int index, bool front, float centerX, float floorY)
+        {
+            Vec2 shoulder, hand;
+            _simulation.GetArm(index, front, out shoulder, out hand);
+
+            int frame = SlugcatSimulation.ArmFrameForLength(Vec2.Distance(shoulder, hand));
+            PointF ps = ToScreen(shoulder, centerX, floorY);
+            PointF ph = ToScreen(hand, centerX, floorY);
+
+            // O sprite aponta do ombro (direita) para a mão (esquerda): o eixo -X do sprite
+            // deve coincidir com o vetor ombro->mão na tela.
+            float angle = (float)(Math.Atan2(-(ph.Y - ps.Y), -(ph.X - ps.X)) * 180.0 / Math.PI);
+
+            // Âncora = ombro (borda direita, meio da altura). Sem flip: a direção já espelha.
+            DrawSprite(g, _arms[frame], ps, angle, false, 1f, 0.5f);
         }
 
         private void DrawTail(Graphics g, Vec2 anchor, float centerX, float floorY)
@@ -817,7 +895,6 @@ namespace SlugcatDesktop
             }
 
             // Interpolate between the four simulated tail segments before outlining them.
-            // This keeps the Rain World pixel look while avoiding a five-corner silhouette.
             const int curveSteps = 5;
             int smoothCount = (count - 1) * curveSteps + 1;
             Vec2[] smoothLine = new Vec2[smoothCount];
@@ -913,37 +990,43 @@ namespace SlugcatDesktop
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.Left)
             {
-                // Verifica se clicou no Slugcat (na posição renderizada)
-                float centerX = ClientSize.Width * 0.5f;
-                float floorY = ClientSize.Height - 19f;
-                
-                // Posição do corpo na tela
-                Vec2 bodyPos = (_simulation.Chunks[0].Pos + _simulation.Chunks[1].Pos) * 0.5f;
-                PointF screenPos = new PointF(
-                    centerX + bodyPos.X * PixelScale,
-                    floorY - bodyPos.Y * PixelScale
-                );
-                
-                // Área de click: 60x80 pixels ao redor do slugcat
-                float dx = e.X - screenPos.X;
-                float dy = e.Y - screenPos.Y;
-                if (Math.Abs(dx) < 30 && Math.Abs(dy) < 40)
-                {
-                    _simulation.RequestJump();
-                }
+                _dragging = true;
+                _dragStart = e.Location;
             }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            // Removido sistema de arrastar - janela agora é fixa
+            if (_dragging)
+            {
+                Point delta = new Point(e.X - _dragStart.X, e.Y - _dragStart.Y);
+                Location = new Point(Location.X + delta.X, Location.Y + delta.Y);
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            // Removido
+            if (e.Button == MouseButtons.Left)
+            {
+                _dragging = false;
+                
+                // Se foi um click rápido (pouco movimento), faz o Slugcat pular
+                Point delta = new Point(e.X - _dragStart.X, e.Y - _dragStart.Y);
+                float distance = (float)Math.Sqrt(delta.X * delta.X + delta.Y * delta.Y);
+                if (distance < 10f) // Menos de 10 pixels = click, não drag
+                {
+                    // Verifica se clicou perto do corpo (área de 60x80px)
+                    float centerX = ClientSize.Width * 0.5f;
+                    float floorY = ClientSize.Height - 19f;
+                    Vec2 bodyPos = (_simulation.Chunks[0].Pos + _simulation.Chunks[1].Pos) * 0.5f;
+                    PointF screenPos = ToScreen(bodyPos, centerX, floorY);
+                    
+                    if (Math.Abs(e.X - screenPos.X) < 30 && Math.Abs(e.Y - screenPos.Y) < 40)
+                        _simulation.RequestJump();
+                }
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)

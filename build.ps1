@@ -11,7 +11,7 @@ if (-not (Test-Path $csc)) {
 $root   = $PSScriptRoot
 $src    = Join-Path $root 'SlugcatDesktop.cs'
 $mani   = Join-Path $root 'app.manifest'
-$out    = Join-Path $root 'SlugcatCompanion.exe'
+$out    = Join-Path $root 'SlugcatCompanion-v20.exe'
 
 Write-Host "Compilando..." -ForegroundColor Cyan
 & $csc /nologo /target:winexe /optimize+ `
