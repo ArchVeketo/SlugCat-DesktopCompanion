@@ -1,6 +1,19 @@
-# Build outputs
+# Compilados
 *.exe
 *.pdb
+
+# Assets do Rain World (copyright Videocult — não distribuir)
+assets/player/*.png
+
+# Artefatos de build
+build_out.txt
+build_err.txt
+
+# Log de runtime
+log.txt
+
+# Workflows e tarefas do agente
+.agents/
 
 # Visual Studio
 .vs/
@@ -8,8 +21,6 @@
 *.user
 *.userosscache
 *.sln.docstates
-
-# Build results
 [Dd]ebug/
 [Rr]elease/
 x64/

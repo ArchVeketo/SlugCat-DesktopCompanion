@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 
 namespace SlugcatDesktop
@@ -1468,9 +1471,17 @@ namespace SlugcatDesktop
                 Vec2 shoulder0, hand0, shoulder1, hand1;
                 _simulation.GetArm(0, true, out shoulder0, out hand0);
                 _simulation.GetArm(1, false, out shoulder1, out hand1);
-                
-                // Formato JSON manual (sem dependência de biblioteca)
-                string json = string.Format(@"{{
+
+                float arm0Dist = Vec2.Distance(shoulder0, hand0);
+                float arm1Dist = Vec2.Distance(shoulder1, hand1);
+
+                // Valida invariantes geometricas da estrutura do personagem.
+                // "issues" nao-vazio significa que o render/fisica saiu do formato esperado.
+                string issues = BuildIssues(arm0Dist, arm1Dist);
+
+                // CultureInfo.InvariantCulture: garante ponto decimal (JSON valido),
+                // nao a virgula da cultura pt-BR.
+                string json = string.Format(CultureInfo.InvariantCulture, @"{{
   ""frame"": {0},
   ""state"": {{
     ""facing"": {1:F2},
@@ -1495,7 +1506,7 @@ namespace SlugcatDesktop
     {{ ""x"": {36:F1}, ""y"": {37:F1}, ""radius"": {38:F2} }},
     {{ ""x"": {39:F1}, ""y"": {40:F1}, ""radius"": {41:F2} }}
   ],
-  ""issues"": []
+  ""issues"": [{42}]
 }}",
                     _debugFrameCounter,
                     _simulation.Facing,
@@ -1514,7 +1525,8 @@ namespace SlugcatDesktop
                     _simulation.Tail[0].Pos.X, _simulation.Tail[0].Pos.Y, _simulation.Tail[0].StretchedRadius,
                     _simulation.Tail[1].Pos.X, _simulation.Tail[1].Pos.Y, _simulation.Tail[1].StretchedRadius,
                     _simulation.Tail[2].Pos.X, _simulation.Tail[2].Pos.Y, _simulation.Tail[2].StretchedRadius,
-                    _simulation.Tail[3].Pos.X, _simulation.Tail[3].Pos.Y, _simulation.Tail[3].StretchedRadius
+                    _simulation.Tail[3].Pos.X, _simulation.Tail[3].Pos.Y, _simulation.Tail[3].StretchedRadius,
+                    issues
                 );
                 
                 string jsonFile = Path.Combine(_debugFolder, string.Format("frame_{0:D6}.json", _debugFrameCounter));
@@ -1524,6 +1536,126 @@ namespace SlugcatDesktop
             {
                 Log.Error("SaveFrameData", ex);
             }
+        }
+
+        /// <summary>
+        /// Verifica invariantes geometricas que caracterizam a estrutura correta do Slugcat.
+        /// Cada violacao vira uma string descritiva no array "issues" do frame JSON, para
+        /// que a analise automatizada detecte deformacao sem depender de inspecao visual.
+        /// </summary>
+        private string BuildIssues(float arm0Dist, float arm1Dist)
+        {
+            List<string> found = new List<string>();
+
+            BodyChunk head = _simulation.Chunks[0];
+            BodyChunk body = _simulation.Chunks[1];
+
+            // 1. NaN / Infinity em qualquer posicao de chunk invalida o frame inteiro.
+            if (IsBadFloat(head.Pos.X) || IsBadFloat(head.Pos.Y) ||
+                IsBadFloat(body.Pos.X) || IsBadFloat(body.Pos.Y))
+            {
+                found.Add("NaN/Infinity em posicao de chunk");
+            }
+
+            // 2. Cabeca (chunk 0) deve ficar acima do corpo (chunk 1). Y cresce para cima.
+            if (head.Pos.Y <= body.Pos.Y)
+            {
+                found.Add(string.Format(CultureInfo.InvariantCulture,
+                    "cabeca abaixo do corpo: head.y={0:F1} body.y={1:F1}", head.Pos.Y, body.Pos.Y));
+            }
+
+            // 3. Distancia entre chunks deve respeitar a constraint de mola (~17px).
+            float chunkDist = Vec2.Distance(head.Pos, body.Pos);
+            float tol = SlugcatSimulation.BodyConnectionDistance * 0.35f;
+            if (Math.Abs(chunkDist - SlugcatSimulation.BodyConnectionDistance) > tol)
+            {
+                found.Add(string.Format(CultureInfo.InvariantCulture,
+                    "distancia entre chunks fora da faixa: {0:F1} (esperado ~{1:F0}+-{2:F0})",
+                    chunkDist, SlugcatSimulation.BodyConnectionDistance, tol));
+            }
+
+            // 4. Bracos nao podem esticar/colapsar alem do plausivel (ombro->mao).
+            CheckArm(found, "arm0", arm0Dist);
+            CheckArm(found, "arm1", arm1Dist);
+
+            // 5. Segmentos da cauda nao podem separar alem do comprimento de conexao.
+            for (int i = 1; i < _simulation.Tail.Length; i++)
+            {
+                TailSegment prev = _simulation.Tail[i - 1];
+                TailSegment seg = _simulation.Tail[i];
+                float segDist = Vec2.Distance(prev.Pos, seg.Pos);
+
+                if (segDist > seg.ConnectionRadius * 2.5f)
+                {
+                    found.Add(string.Format(CultureInfo.InvariantCulture,
+                        "cauda segmento {0} separado: {1:F1} (conexao {2:F1})",
+                        i, segDist, seg.ConnectionRadius));
+                }
+            }
+
+            // 5. Nenhum segmento da cauda pode ultrapassar o alcance maximo a partir do
+            //    quadril (acumulo dos comprimentos de conexao, com folga). Evita a cauda
+            //    "disparar" para longe sem violar a distancia entre segmentos vizinhos.
+            float maxReach = 0f;
+            for (int i = 0; i < _simulation.Tail.Length; i++)
+            {
+                maxReach += _simulation.Tail[i].ConnectionRadius;
+                float reach = Vec2.Distance(_simulation.Tail[i].Pos, body.Pos);
+
+                if (reach > maxReach + 2f)
+                {
+                    found.Add(string.Format(CultureInfo.InvariantCulture,
+                        "cauda segmento {0} fora de alcance: {1:F1} (max ~{2:F1})",
+                        i, reach, maxReach));
+                }
+            }
+
+            // 7. Cabeca (sprite) deve ficar proxima do chunk superior (pescoco). Se descolar,
+            //    o render separou a cabeca do corpo.
+            float headNeck = Vec2.Distance(_simulation.HeadPos, head.Pos);
+            if (IsBadFloat(headNeck) || headNeck < 1f || headNeck > 10f)
+            {
+                found.Add(string.Format(CultureInfo.InvariantCulture,
+                    "cabeca descolada do pescoco: {0:F1} (esperado 1-10)", headNeck));
+            }
+
+            // 8. Pernas devem ficar abaixo do quadril (chunk inferior). Y cresce para cima.
+            if (_simulation.LegsPos.Y >= body.Pos.Y)
+            {
+                found.Add(string.Format(CultureInfo.InvariantCulture,
+                    "pernas acima do quadril: legs.y={0:F1} hip.y={1:F1}",
+                    _simulation.LegsPos.Y, body.Pos.Y));
+            }
+
+            if (found.Count == 0)
+                return string.Empty;
+
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < found.Count; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                sb.Append('"').Append(found[i].Replace("\"", "'")).Append('"');
+            }
+            return sb.ToString();
+        }
+
+        private static void CheckArm(List<string> found, string name, float dist)
+        {
+            // Faixa plausivel ombro->mao. Fora disso indica braco esticado ou colapsado.
+            const float ArmMin = 2f;
+            const float ArmMax = 16f;
+
+            if (IsBadFloat(dist) || dist < ArmMin || dist > ArmMax)
+            {
+                found.Add(string.Format(CultureInfo.InvariantCulture,
+                    "{0} fora da faixa ombro-mao: {1:F1} (esperado {2:F0}-{3:F0})",
+                    name, dist, ArmMin, ArmMax));
+            }
+        }
+
+        private static bool IsBadFloat(float v)
+        {
+            return float.IsNaN(v) || float.IsInfinity(v);
         }
 
         private void DrawArm(Graphics g, int index, bool front, float centerX, float floorY)
