@@ -482,7 +482,7 @@ namespace SlugcatDesktop
             Vec2 draw1 = rig.Belly;
 
             // Get spine angle from draw0 to draw1
-            float spineAng = (float)Math.Atan2(draw1.Y - draw0.Y, draw1.X - draw0.X);
+            float spineAng = (float)Math.Atan2(draw0.Y - draw1.Y, draw0.X - draw1.X);
             // Rotate shoulder offset by spine angle (Y offset is 3.5 in Y-down, so -3.5 in our Y-up)
             float ox = Facing * 4.5f;
             float oy = -3.5f;
