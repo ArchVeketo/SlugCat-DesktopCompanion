@@ -34,17 +34,14 @@ Write-Host "`nAdicionando arquivos..." -ForegroundColor Yellow
 git add -A
 git status --short
 
-Write-Host "`nFazendo commit inicial..." -ForegroundColor Yellow
-git commit -m "feat: v16.1 - Slugcat Desktop Companion with arms, dynamic head, and facial expressions
+Write-Host "`nFazendo commit de atualização..." -ForegroundColor Yellow
+git commit -m "fix(v16.2): monitor full-width traversal, arm order inversion and face rotation
 
-- Corpo articulado com 3 pivôs (waist, belly, neck)
-- Braços dinâmicos com 13 frames de animação
-- Cabeça rotativa com frames 0-8
-- Expressões faciais com 9 frames + sistema de piscadas
-- Rabo fluido com interpolação Catmull-Rom
-- Janela full-width do monitor
-- Click preciso no Slugcat (hit-box 60x80px)
-- Proteções anti-bug em cálculos proceduais"
+- Movimentação cobrindo a largura real do monitor
+- Correção de inversão de ordem dos braços (frente/trás) e suporte a Facing
+- Rosto rotacionando em sincronia com o segmento da cabeça
+- Espelhamento de anchorX em sprites assimétricos com flip horizontal
+- Prevenção de perda de precisão float no ciclo de passos"
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✓ Commit realizado com sucesso!" -ForegroundColor Green
@@ -55,7 +52,7 @@ if ($LASTEXITCODE -eq 0) {
 # Volta para main e faz merge do develop
 Write-Host "`nConfigurando branch main..." -ForegroundColor Yellow
 git checkout main
-git merge develop --no-ff -m "release: v16.1 - First stable release"
+git merge develop --no-ff -m "release: v16.2 - Bugfix patch for companion simulation and rendering"
 
 Write-Host "`n=== Setup concluído! ===" -ForegroundColor Cyan
 Write-Host "Branches:" -ForegroundColor Yellow

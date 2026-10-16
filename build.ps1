@@ -1,18 +1,25 @@
 $ErrorActionPreference = 'Stop'
-$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-if (-not (Test-Path -LiteralPath $compiler)) {
-    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+
+$csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path $csc)) {
+    $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
 }
-if (-not (Test-Path -LiteralPath $compiler)) {
-    throw 'Não encontrei o compilador C# do .NET Framework neste Windows.'
+if (-not (Test-Path $csc)) {
+    throw 'Nao encontrei o compilador csc.exe do .NET Framework.'
 }
 
-$source = Join-Path $PSScriptRoot 'SlugcatDesktop.cs'
-$manifest = Join-Path $PSScriptRoot 'app.manifest'
-$output = Join-Path $PSScriptRoot 'SlugcatCompanion-v13.exe'
-& $compiler /nologo /target:winexe /optimize+ /win32manifest:$manifest /out:$output `
-    /reference:System.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $source
-if ($LASTEXITCODE -ne 0) {
-    throw 'A compilação do Slugcat Companion falhou.'
-}
-Write-Host "Executável criado: $output"
+$root   = $PSScriptRoot
+$src    = Join-Path $root 'SlugcatDesktop.cs'
+$mani   = Join-Path $root 'app.manifest'
+$out    = Join-Path $root 'SlugcatCompanion-v20.exe'
+
+Write-Host "Compilando..." -ForegroundColor Cyan
+& $csc /nologo /target:winexe /optimize+ `
+       /win32manifest:$mani /out:$out `
+       /reference:System.dll `
+       /reference:System.Drawing.dll `
+       /reference:System.Windows.Forms.dll `
+       $src
+
+if ($LASTEXITCODE -ne 0) { throw 'Compilacao falhou.' }
+Write-Host "OK: $out" -ForegroundColor Green
