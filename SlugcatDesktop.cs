@@ -296,14 +296,7 @@ namespace SlugcatDesktop
         // Metade da largura do mundo em unidades de simulação (definida pela janela a partir do monitor).
         public float WorldHalfWidth = 60f;
 
-        // Constantes para fisica das pernas (baseado no slugcatpet, Y positivo para cima)
-        private const float LEGS_AIR = 0.99f;
-        private const float LEGS_CONNECT_RAD = 5f;
-        private const float LEGS_ELASTIC = 0.25f;
-        private const float LEGS_ADAPT_RETAIN = 0.5f;
-        private const float LEGS_EXAGGERATE = 0.1f;
-        private const float LEGS_HOST_VY = -10f;  // Negativo porque Y sobe
-
+        
         // Constantes para fisica da cabeca
         private const float HEAD_AIR = 0.99f;
         private const float HEAD_CONNECT_RAD = 3f;
@@ -503,37 +496,40 @@ namespace SlugcatDesktop
         }
 
         /// <summary>
-        /// Atualiza fisica das pernas usando GenericBone.ConnectToPoint com gravidade visual constante.
+        /// Atualiza fisica das pernas com posicionamento relativo ao quadril.
         /// </summary>
         private void UpdateLegs()
         {
-            // 1. Atualiza fisica (inercia + atrito)
-            Legs.Update(LEGS_AIR);
-            
-            // 2. Calcula posicao do quadril e target
             Vec2 hipPos = Chunks[1].Pos;
-            Vec2 target;
             
-            // 3. Conecta com parametros diferentes para chao vs ar
-            if (IsOnGround())
+            // Target: pernas ficam abaixo do quadril, com offset horizontal baseado no movimento
+            float legOffsetX = 0f;
+            float legOffsetY = -8f;  // Pernas ficam 8 unidades abaixo do quadril
+            
+            if (Walking && IsOnGround())
             {
-                target = hipPos + new Vec2(LegsDirection.X * 8f, -1f);
-                Legs.ConnectToPoint(target, Chunks[1].Vel.X, LEGS_HOST_VY, 5f, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
-            }
-            else
-            {
-                target = hipPos + new Vec2(LegsDirection.X * 8f, -2f);
-                Legs.ConnectToPoint(target, Chunks[1].Vel.X, LEGS_HOST_VY, LEGS_CONNECT_RAD, LEGS_ELASTIC, LEGS_ADAPT_RETAIN, LEGS_EXAGGERATE);
+                // Quando andando, as pernas oscilam com o ciclo de caminhada
+                float swing = (float)Math.Sin(WalkPhase * 0.35f) * 2f * _walkAcceleration;
+                legOffsetX = Facing * swing;
             }
             
-            // 4. Colisao com chao
-            Legs.PushOutOfFloor();
+            Vec2 target = hipPos + new Vec2(legOffsetX, legOffsetY);
             
-            // 5. Atualiza direcao das pernas
-            UpdateLegsDirection();
+            // Suaviza movimento das pernas em direcao ao target
+            Vec2 diff = target - Legs.Pos;
+            float followSpeed = IsOnGround() ? 0.4f : 0.25f;
             
-            // 6. Sincroniza LegsPos para compatibilidade
+            Legs.Pos = Legs.Pos + diff * followSpeed;
+            
+            // Garante que pernas nao afundem no chao
+            if (Legs.Pos.Y < 1f)
+                Legs.Pos.Y = 1f;
+            
+            // Sincroniza LegsPos para compatibilidade com renderizacao
             LegsPos = Legs.Pos;
+            
+            // Atualiza direcao das pernas
+            UpdateLegsDirection();
         }
 
         /// <summary>
