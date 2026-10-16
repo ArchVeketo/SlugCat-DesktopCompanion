@@ -9,8 +9,8 @@ namespace SlugcatDesktop
     /// Render de malha deformavel do Slugcat via warp afim por triangulo em GDI+.
     /// Contem os helpers de FW 4.0 (sem Math.Clamp, sem MathF) e o nucleo da malha:
     /// DrawTexturedTriangle (+ guard IsDegenerate) e PadTexture (borda replicada).
-    /// As rotinas de montagem de malha (BuildTailVertices/Triangles, BuildBodyGrid)
-    /// entram nas FEATs seguintes.
+    /// Montagem da malha da cauda: BuildTailVertices/BuildTailTriangles (FEAT-003).
+    /// A grade do tronco (BuildBodyGrid) entra em FEAT seguinte.
     /// </summary>
     internal static class MeshRenderer
     {
@@ -140,6 +140,114 @@ namespace SlugcatDesktop
             }
 
             return destino;
+        }
+
+        /// <summary>
+        /// Epsilon para divisoes por comprimento (tangente/perpendicular) na montagem
+        /// da malha da cauda. Abaixo disso o segmento e tratado como de comprimento nulo.
+        /// </summary>
+        private const float EpsilonComprimento = 1e-6f;
+
+        /// <summary>
+        /// Gera os vertices da malha da cauda em coordenadas de simulacao (Y-para-cima).
+        /// Porta de game_tail_vertices (tailtex.py do slugcatpet, report §1.3).
+        /// Layout: N segmentos -> 4N-1 vertices. Para cada segmento emite um par
+        /// esquerda/direita na base (deslocado pela perpendicular * largura) e um par
+        /// no topo recuado k = dist/5 para o miolo; o ultimo segmento colapsa num unico
+        /// vertice de ponta. A conversao Y-para-baixo (perpendicular invertida) fica a
+        /// cargo do chamador via ToScreen.
+        /// </summary>
+        /// <param name="root">Raiz da cauda = TailAnchor = (quadril*3 + torax)/4, em simulacao.</param>
+        /// <param name="rootRadius">Largura inicial da faixa na raiz (StretchedRadius do 1o segmento).</param>
+        /// <param name="tail">Segmentos da cauda (Pos + StretchedRadius).</param>
+        /// <param name="destino">Buffer de saida pre-alocado com pelo menos 4N-1 posicoes.</param>
+        /// <returns>Quantidade de vertices escritos em <paramref name="destino"/> (4N-1).</returns>
+        public static int BuildTailVertices(Vec2 root, float rootRadius, TailSegment[] tail, Vec2[] destino)
+        {
+            Vec2 v = root;
+            float w = rootRadius;
+            int n = 0;
+
+            for (int i = 0; i < tail.Length; i++)
+            {
+                Vec2 s = tail[i].Pos;
+                float r = tail[i].StretchedRadius;
+
+                Vec2 d = s - v;
+                float dist = d.Length;
+                Vec2 tangente = dist > EpsilonComprimento ? d / dist : new Vec2(0f, 1f);
+                Vec2 perpendicular = new Vec2(tangente.Y, -tangente.X);
+                float k = (i == 0) ? 0f : dist / 5f;
+
+                // Par da base (recuado +k ao longo da tangente, no inicio do segmento).
+                destino[n++] = v - perpendicular * w + tangente * k;
+                destino[n++] = v + perpendicular * w + tangente * k;
+
+                if (i < tail.Length - 1)
+                {
+                    // Par do topo (recuado -k, no fim do segmento).
+                    destino[n++] = s - perpendicular * r - tangente * k;
+                    destino[n++] = s + perpendicular * r - tangente * k;
+                }
+                else
+                {
+                    // Ultimo segmento: ponta unica.
+                    destino[n++] = s;
+                }
+
+                w = r;
+                v = s;
+            }
+
+            return n;
+        }
+
+        /// <summary>
+        /// Gera os indices de triangulos da malha da cauda. Porta de _tris (tailtex.py).
+        /// Padrao por segmento: 2 triangulos "own" (base->topo do proprio segmento) e,
+        /// entre segmentos, 2 triangulos "link"; o ultimo segmento fecha com 1 triangulo
+        /// de ponta. Total 4N-3 triangulos (12N-9 indices) para N segmentos.
+        /// Supoe o layout 4N-1 de BuildTailVertices: cada segmento ocupa 4 vertices
+        /// (base esq, base dir, topo esq, topo dir), e o ultimo tem 3 (base esq, base dir, ponta).
+        /// </summary>
+        /// <param name="vertCount">Quantidade de vertices (4N-1).</param>
+        /// <param name="destino">Buffer de saida pre-alocado com pelo menos 12N-9 posicoes.</param>
+        /// <returns>Quantidade de indices escritos (12N-9).</returns>
+        public static int BuildTailTriangles(int vertCount, int[] destino)
+        {
+            // 4N-1 = vertCount  ->  N = (vertCount + 1) / 4
+            int n = (vertCount + 1) / 4;
+            int idx = 0;
+
+            for (int i = 0; i < n; i++)
+            {
+                int baseEsq = i * 4;
+                int baseDir = baseEsq + 1;
+
+                if (i < n - 1)
+                {
+                    int topoEsq = baseEsq + 2;
+                    int topoDir = baseEsq + 3;
+
+                    // "own": o quad do proprio segmento (base -> topo).
+                    destino[idx++] = baseEsq; destino[idx++] = baseDir; destino[idx++] = topoEsq;
+                    destino[idx++] = baseDir; destino[idx++] = topoDir; destino[idx++] = topoEsq;
+
+                    // "link": liga o topo deste segmento a base do proximo.
+                    int proxBaseEsq = (i + 1) * 4;
+                    int proxBaseDir = proxBaseEsq + 1;
+                    destino[idx++] = topoEsq; destino[idx++] = topoDir; destino[idx++] = proxBaseEsq;
+                    destino[idx++] = topoDir; destino[idx++] = proxBaseDir; destino[idx++] = proxBaseEsq;
+                }
+                else
+                {
+                    // Ultimo segmento: fecha na ponta (vertice baseEsq+2).
+                    int ponta = baseEsq + 2;
+                    destino[idx++] = baseEsq; destino[idx++] = baseDir; destino[idx++] = ponta;
+                }
+            }
+
+            return idx;
         }
 
         /// <summary>Retangulo-fonte (bounding) que cobre os tres cantos UV.</summary>

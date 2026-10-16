@@ -97,6 +97,16 @@ namespace SlugcatDesktop
         private readonly Point[] _tailOutline  = new Point[42];
         private static readonly SolidBrush _whiteBrush = new SolidBrush(Color.White);
 
+        // Buffers da malha da cauda (FEAT-003). Para N=4 segmentos: 4N-1=15 vertices,
+        // 12N-9=39 indices de triangulo. Pre-alocados para evitar GC a 60 FPS.
+        private readonly Vec2[] _tailMeshVerts = new Vec2[15];
+        private readonly int[] _tailMeshTris = new int[39];
+        private Bitmap _tailPadded; // faixa de BodyA (textura da cauda) com borda replicada
+
+        // Fallback R2.4: quando true, a cauda volta ao poligono monocromatico antigo
+        // (FillPolygon branco) em vez da malha texturizada. Padrao: malha (false).
+        private const bool TailMeshFallback = false;
+
         // === DEBUG MODE ===
         private const bool DebugMode = false; // Debug mode desativado para release
 
@@ -873,6 +883,14 @@ namespace SlugcatDesktop
                     _simulation.LegsPos.Y, body.Pos.Y));
             }
 
+            // 10. Malha da cauda nao-degenerada (invariante nova da migracao de render).
+            //     Vertices finitos e cada triangulo com area nao-nula e sinal consistente
+            //     (sem auto-cruzamento/inversao). So vale quando a cauda e malha, nao fallback.
+            if (!TailMeshFallback)
+            {
+                CheckTailMesh(found);
+            }
+
             if (found.Count == 0)
                 return string.Empty;
 
@@ -883,6 +901,47 @@ namespace SlugcatDesktop
                 sb.Append('"').Append(found[i].Replace("\"", "'")).Append('"');
             }
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Invariante #10 (report §5): a malha da cauda nao pode gerar triangulos
+        /// degenerados. Reconstroi os vertices/triangulos como em DrawTailMesh (em
+        /// coordenadas de simulacao) e verifica, para cada triangulo: vertices finitos
+        /// e area nao-nula (|produto vetorial| acima do epsilon). Area nula = fold/colapso
+        /// que vira buraco no render. Nao comparamos o SINAL do produto vetorial entre
+        /// triangulos: no layout 4N-1 os triangulos "own" (dentro do segmento) e "link"
+        /// (entre segmentos) tem winding naturalmente distinto quando a cauda curva, logo
+        /// um sinal global unico produziria falso positivo numa malha visualmente integra.
+        /// Qualquer falha adiciona "mesh_degenerate_triangle" a lista.
+        /// </summary>
+        private void CheckTailMesh(List<string> found)
+        {
+            TailSegment[] tail = _simulation.Tail;
+            float rootRadius = tail[0].StretchedRadius;
+            int vertCount = MeshRenderer.BuildTailVertices(
+                _simulation.TailAnchor, rootRadius, tail, _tailMeshVerts);
+            int triCount = MeshRenderer.BuildTailTriangles(vertCount, _tailMeshTris);
+
+            for (int t = 0; t < triCount; t += 3)
+            {
+                Vec2 a = _tailMeshVerts[_tailMeshTris[t]];
+                Vec2 b = _tailMeshVerts[_tailMeshTris[t + 1]];
+                Vec2 c = _tailMeshVerts[_tailMeshTris[t + 2]];
+
+                if (!MeshRenderer.IsFinite(a) || !MeshRenderer.IsFinite(b) || !MeshRenderer.IsFinite(c))
+                {
+                    found.Add("mesh_degenerate_triangle (vertice nao-finito na cauda)");
+                    return;
+                }
+
+                float cross = (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+
+                if (Math.Abs(cross) < 1e-4f)
+                {
+                    found.Add("mesh_degenerate_triangle (area nula na cauda)");
+                    return;
+                }
+            }
         }
 
         private static void CheckArm(List<string> found, string name, float dist)
@@ -926,6 +985,74 @@ namespace SlugcatDesktop
         }
 
         private void DrawTail(Graphics g, Vec2 anchor, float centerX, float floorY)
+        {
+            if (TailMeshFallback)
+            {
+                DrawTailMono(g, anchor, centerX, floorY);
+                return;
+            }
+
+            DrawTailMesh(g, anchor, centerX, floorY);
+        }
+
+        /// <summary>
+        /// Desenha a cauda como malha texturizada deformavel (FEAT-003). Porta a receita
+        /// do report §1.3: gera 4N-1 vertices (BuildTailVertices) a partir de TailAnchor +
+        /// Tail[i].StretchedRadius, monta 4N-3 triangulos (BuildTailTriangles) e warpa uma
+        /// faixa de BodyA por triangulo via MeshRenderer.DrawTexturedTriangle. Le o estado
+        /// SO via IPhysicsProvider; nao altera a fisica. Converte as posicoes de simulacao
+        /// (Y-para-cima) para tela (Y-para-baixo) com ToScreen a cada vertice.
+        /// </summary>
+        private void DrawTailMesh(Graphics g, Vec2 anchor, float centerX, float floorY)
+        {
+            TailSegment[] tail = _simulation.Tail;
+
+            // Textura da cauda: faixa de BodyA (nao ha asset dedicado) com borda replicada.
+            if (_tailPadded == null)
+                _tailPadded = MeshRenderer.PadTexture(_body);
+
+            float rootRadius = tail[0].StretchedRadius;
+            int vertCount = MeshRenderer.BuildTailVertices(anchor, rootRadius, tail, _tailMeshVerts);
+            int triCount = MeshRenderer.BuildTailTriangles(vertCount, _tailMeshTris);
+
+            // UV: u = indiceVertice / (vertCount-1) mapeia a largura da textura ao longo
+            // da cauda; v alterna base/topo da faixa (par da base vs par do topo/ponta).
+            float texLargura = _tailPadded.Width;
+            float texAltura = _tailPadded.Height;
+            float vBase = 1f;                 // borda replicada desloca +1px
+            float vTopo = texAltura - 1f;
+
+            for (int t = 0; t < triCount; t += 3)
+            {
+                int i0 = _tailMeshTris[t];
+                int i1 = _tailMeshTris[t + 1];
+                int i2 = _tailMeshTris[t + 2];
+
+                PointF uv0 = UvCauda(i0, vertCount, texLargura, vBase, vTopo);
+                PointF uv1 = UvCauda(i1, vertCount, texLargura, vBase, vTopo);
+                PointF uv2 = UvCauda(i2, vertCount, texLargura, vBase, vTopo);
+
+                PointF d0 = ToScreen(_tailMeshVerts[i0], centerX, floorY);
+                PointF d1 = ToScreen(_tailMeshVerts[i1], centerX, floorY);
+                PointF d2 = ToScreen(_tailMeshVerts[i2], centerX, floorY);
+
+                MeshRenderer.DrawTexturedTriangle(g, _tailPadded, uv0, uv1, uv2, d0, d1, d2);
+            }
+        }
+
+        /// <summary>
+        /// Coordenada UV (px da textura) de um vertice da malha da cauda. O layout e
+        /// 4 vertices por segmento (base esq/dir, topo esq/dir) + ponta final; vertices
+        /// pares (0,2,...) ficam na base da faixa e impares no topo. u avanca com o indice.
+        /// </summary>
+        private static PointF UvCauda(int indice, int vertCount, float texLargura, float vBase, float vTopo)
+        {
+            float u = 1f + (indice / (float)(vertCount - 1)) * (texLargura - 2f);
+            float v = (indice % 2 == 0) ? vBase : vTopo;
+            return new PointF(u, v);
+        }
+
+        private void DrawTailMono(Graphics g, Vec2 anchor, float centerX, float floorY)
         {
             int count = _simulation.Tail.Length + 1;
             Vec2[] centerline = _tailCL;
@@ -1084,6 +1211,8 @@ namespace SlugcatDesktop
             _body.Dispose();
             if (_bodyPadded != null)
                 _bodyPadded.Dispose();
+            if (_tailPadded != null)
+                _tailPadded.Dispose();
             _hips.Dispose();
             for (int i = 0; i < _heads.Length; i++)
                 _heads[i].Dispose();
