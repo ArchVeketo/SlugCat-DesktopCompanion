@@ -10,6 +10,7 @@ if (-not (Test-Path $csc)) {
 
 $root   = $PSScriptRoot
 $src    = Join-Path $root 'SlugcatDesktop.cs'
+$srcDir = Join-Path $root 'src\*.cs'
 $mani   = Join-Path $root 'app.manifest'
 $out    = Join-Path $root 'SlugcatCompanion-v20.exe'
 
@@ -19,7 +20,7 @@ Write-Host "Compilando..." -ForegroundColor Cyan
        /reference:System.dll `
        /reference:System.Drawing.dll `
        /reference:System.Windows.Forms.dll `
-       $src
+       $src $srcDir
 
 if ($LASTEXITCODE -ne 0) { throw 'Compilacao falhou.' }
 Write-Host "OK: $out" -ForegroundColor Green
