@@ -1,0 +1,27 @@
+{
+  "frame": 101,
+  "state": {
+    "facing": 1.00,
+    "walking": false,
+    "walkSpeed": 0.00,
+    "lookX": 1.00,
+    "lookY": 0.00
+  },
+  "chunks": {
+    "head": { "x": 0.0, "y": 24.1, "vx": 0.00, "vy": 0.00 },
+    "body": { "x": 0.0, "y": 7.1, "vx": 0.00, "vy": -0.90 }
+  },
+  "arms": {
+    "arm0": { "shoulder": { "x": 3.5, "y": 25.6 }, "hand": { "x": 3.5, "y": 15.6 }, "distance": 10.0 },
+    "arm1": { "shoulder": { "x": 3.5, "y": 25.6 }, "hand": { "x": 3.5, "y": 15.6 }, "distance": 10.0 }
+  },
+  "legs": { "x": 0.0, "y": 1.0, "frame": 0 },
+  "head": { "x": 0.5, "y": 28.7, "frame": 0 },
+  "tail": [
+    { "x": -0.3, "y": 7.3, "radius": 6.00 },
+    { "x": -4.6, "y": 1.8, "radius": 4.00 },
+    { "x": -11.6, "y": 1.1, "radius": 2.50 },
+    { "x": -18.5, "y": 0.5, "radius": 1.00 }
+  ],
+  "issues": []
+}
